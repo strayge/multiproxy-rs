@@ -35,33 +35,36 @@ async fn handle_client_connection(
     mut rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (reader, writer) = client_socket.into_split();
-    let reader = Arc::new(tokio::sync::Mutex::new(reader));
-    let writer = Arc::new(tokio::sync::Mutex::new(writer));
 
-    async fn read_socket_loop(reader: Arc<tokio::sync::Mutex<OwnedReadHalf>>) {
+    async fn read_socket_loop(mut reader: OwnedReadHalf) {
+        println!("start read loop");
         let mut buf = [0; 1024];
-        let mut reader = reader.lock().await;
         loop {
             let len = reader.read(&mut buf).await.unwrap();
+            println!("read from client");
             if len == 0 {
                 break;
             }
         }
+        println!("end read loop");
+    }
+
+    async fn read_queue_loop(
+        mut writer: OwnedWriteHalf,
+        rx: &mut mpsc::Receiver<Vec<u8>>
+    ) {
+        println!("start queue loop");
+        while let Some(res) = rx.recv().await {
+            println!("write to client");
+            writer.write_all(&res).await.unwrap();
+            println!("write to client done")
+        }
+        println!("end queue loop");
     }
 
     tokio::spawn(async move {
         read_socket_loop(reader).await;
     });
-
-    async fn read_queue_loop(
-        writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>,
-        rx: &mut mpsc::Receiver<Vec<u8>>
-) {
-        let mut writer = writer.lock().await;
-        while let Some(res) = rx.recv().await {
-            writer.write_all(&res).await.unwrap();
-        }
-    }
 
     tokio::spawn(async move {
         read_queue_loop(writer, &mut rx).await;
