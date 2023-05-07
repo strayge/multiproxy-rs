@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             handle_client_connection(
                 client_socket,
+                id,
                 sender_rx,
                 tunn_senders,
             ).await.unwrap();
@@ -59,6 +60,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     }
 
+    Ok(())
+}
+
+async fn process_client_data(
+    data: [u8; 1024],
+    len: usize,
+    id: u32,
+    tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // TODO: make func build frames and to send to free tunnel
+    println!("client in: {:?}", String::from_utf8(data[..len].to_vec()));
+    let tunn_tx = tunn_senders.lock().unwrap().get(&0).unwrap().clone();
+    tunn_tx.send(data[..len].to_vec()).await?;
+    Ok(())
+}
+
+async fn process_tunnel_data(
+    data: [u8; 1024],
+    len: usize,
+    conn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // TODO: make func to parse/detect conn/rearrange etc...
+    println!("tunnel in: {:?}", String::from_utf8(data[..len].to_vec()));
+    let conn_tx = conn_senders.lock().unwrap().values().next().unwrap().clone();
+    conn_tx.send(data[..len].to_vec()).await?;
     Ok(())
 }
 
@@ -74,10 +100,7 @@ async fn read_tunnel_loop(
         if len == 0 {
             break;
         }
-        // TODO: make func to parse/detect conn/rearrange etc...
-        println!("tunnel in: {:?}", String::from_utf8(buf[..len].to_vec()));
-        let conn_tx = conn_senders.lock().unwrap().values().next().unwrap().clone();
-        conn_tx.send(buf[..len].to_vec()).await?;
+        process_tunnel_data(buf, len, conn_senders.clone()).await?;
     }
     println!("end read_tunnel_loop");
     Ok(())
@@ -96,17 +119,16 @@ async fn write_tunnel_loop(
     Ok(())
 }
 
-
-// TcpStream incapsulated in this function
 async fn handle_client_connection(
     client_socket: TcpStream,
+    id: u32,
     mut sender_rx: mpsc::Receiver<Vec<u8>>,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (socket_reader, socket_writer) = client_socket.into_split();
 
     tokio::spawn(async move {
-        if let Err(err) = read_client_loop(socket_reader, tunn_senders).await {
+        if let Err(err) = read_client_loop(socket_reader, id, tunn_senders).await {
             println!("read_client_loop error: {}", err);
         }
     });
@@ -122,6 +144,7 @@ async fn handle_client_connection(
 
 async fn read_client_loop(
     mut socket_reader: OwnedReadHalf,
+    id: u32,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start read_client_loop");
@@ -132,10 +155,7 @@ async fn read_client_loop(
         if len == 0 {
             break;
         }
-        // TODO: make func build frames and to send to free tunnel
-        println!("client in: {:?}", String::from_utf8(buf[..len].to_vec()));
-        let tunn_tx = tunn_senders.lock().unwrap().get(&0).unwrap().clone();
-        tunn_tx.send(buf[..len].to_vec()).await?;
+        process_client_data(buf, len, id, tunn_senders.clone()).await?;
     }
     println!("end read_client_loop");
     Ok(())
