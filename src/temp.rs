@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-
+use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
@@ -36,38 +36,44 @@ async fn handle_client_connection(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (reader, writer) = client_socket.into_split();
 
-    async fn read_socket_loop(mut reader: OwnedReadHalf) {
+    async fn read_socket_loop(mut reader: OwnedReadHalf) -> io::Result<()> {
         println!("start read loop");
         let mut buf = [0; 1024];
         loop {
-            let len = reader.read(&mut buf).await.unwrap();
+            let len = reader.read(&mut buf).await?;
             println!("read from client");
             if len == 0 {
                 break;
             }
         }
         println!("end read loop");
+        Ok(())
     }
 
     async fn read_queue_loop(
         mut writer: OwnedWriteHalf,
-        rx: &mut mpsc::Receiver<Vec<u8>>
-    ) {
+        rx: &mut mpsc::Receiver<Vec<u8>>,
+    ) -> io::Result<()> {
         println!("start queue loop");
         while let Some(res) = rx.recv().await {
             println!("write to client");
-            writer.write_all(&res).await.unwrap();
+            writer.write_all(&res).await?;
             println!("write to client done")
         }
         println!("end queue loop");
+        Ok(())
     }
 
     tokio::spawn(async move {
-        read_socket_loop(reader).await;
+        if let Err(err) = read_socket_loop(reader).await {
+            println!("read_socket_loop error: {}", err);
+        }
     });
 
     tokio::spawn(async move {
-        read_queue_loop(writer, &mut rx).await;
+        if let Err(err) = read_queue_loop(writer, &mut rx).await {
+            println!("read_queue_loop error: {}", err);
+        }
     });
 
     Ok(())
