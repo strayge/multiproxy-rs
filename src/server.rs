@@ -60,6 +60,7 @@ async fn process_client_data(
             let frame = structures::FrameBindRequest::from_bytes(&data[offset..]);
             println!("bind recv: {:?}", frame);
             create_remote_conn(
+                frame.connection_id,
                 frame.dest_host,
                 frame.dest_port,
                 remote_senders.clone(),
@@ -89,13 +90,15 @@ async fn process_client_data(
 async fn process_remote_data(
     data: [u8; 1024],
     len: usize,
+    connection_id: u32,
+    seq: u32,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // read from remote and pass to tunnel client
 
     let frame = structures::FrameData {
-        connection_id: 0,
-        seq: 0,
+        connection_id: connection_id,
+        seq: seq,
         length: len as u32,
         data: data[..len].to_vec(),
     };
@@ -182,6 +185,7 @@ async fn write_client_loop(
 }
 
 async fn create_remote_conn(
+    connection_id: u32,
     hostname: String,
     port: u16,
     remote_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
@@ -198,7 +202,9 @@ async fn create_remote_conn(
     let tunn_senders = tunn_senders.clone();
 
     tokio::spawn(async move {
-        if let Err(err) = read_remote_loop(remote_socket_reader, tunn_senders).await {
+        if let Err(err) = read_remote_loop(
+            remote_socket_reader, tunn_senders, connection_id,
+        ).await {
             println!("read_remote_loop error: {}", err);
         }
     });
@@ -214,15 +220,18 @@ async fn create_remote_conn(
 async fn read_remote_loop(
     mut remote_socket_reader: OwnedReadHalf,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
+    connection_id: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start read_remote_loop");
     let mut buf = [0; 1024];
+    let mut seq = 0;
     loop {
         let len = remote_socket_reader.read(&mut buf).await?;
         if len == 0 {
             break;
         }
-        process_remote_data(buf, len, tunn_senders.clone()).await?;
+        process_remote_data(buf, len, connection_id, seq, tunn_senders.clone()).await?;
+        seq = seq + 1;
     }
     println!("end read_remote_loop");
     Ok(())

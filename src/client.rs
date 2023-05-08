@@ -72,6 +72,7 @@ async fn process_client_data(
     data: [u8; 1024],
     len: usize,
     id: u32,
+    seq: u32,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     is_first_data: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -103,7 +104,7 @@ async fn process_client_data(
 
     let frame = structures::FrameData {
         connection_id: id,
-        seq: 0,
+        seq: seq,
         length: len as u32,
         data: data[..len].to_vec(),
     };
@@ -248,12 +249,14 @@ async fn read_client_loop(
     println!("start read_client_loop");
     let mut buf = [0; 1024];
     let mut is_first_data = true;
+    let mut seq = 0;
     loop {
         let len = socket_reader.read(&mut buf).await?;
         if len == 0 {
             break;
         }
-        process_client_data(buf, len, id, tunn_senders.clone(), is_first_data).await?;
+        process_client_data(buf, len, id, seq, tunn_senders.clone(), is_first_data).await?;
+        seq = seq + 1;
         is_first_data = false;
     }
     println!("end read_client_loop");
