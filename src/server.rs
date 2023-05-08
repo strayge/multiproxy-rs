@@ -48,33 +48,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn process_client_data(
     data: [u8; 1024],
-    len: usize,
+    offset: usize,
     remote_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // read from tunnel client and pass to remotes
-    println!("client in: {:?}", String::from_utf8(data[..len].to_vec()));
 
-    // DEV: remove this and create remote connection from bind frame
-    if data[..len].to_vec() == b"connect\n" {
-        create_remote_conn(
-            "ya.ru".to_string(),
-            80,
-            remote_senders.clone(),
-            tunn_senders.clone(),
-        )
-        .await?;
-        return Ok(());
+    let frame_type = structures::get_frame_type(&data[offset..]);
+    match frame_type {
+        structures::FrameType::BindRequest => {
+            let frame = structures::FrameBindRequest::from_bytes(&data[offset..]);
+            println!("bind recv: {:?}", frame);
+            create_remote_conn(
+                frame.dest_host,
+                frame.dest_port,
+                remote_senders.clone(),
+                tunn_senders.clone(),
+            )
+            .await?;
+        }
+        structures::FrameType::Data => {
+            let frame = structures::FrameData::from_bytes(&data[offset..]);
+            println!("data recv: {:?}", frame);
+            let remote_tx = remote_senders
+                .lock()
+                .unwrap()
+                .values()
+                .next()
+                .expect("no remote connection found")
+                .clone();
+            remote_tx.send(frame.data).await?;
+        }
+        _ => {
+            panic!("unknown frame type")
+        }
     }
-
-    let remote_tx = remote_senders
-        .lock()
-        .unwrap()
-        .values()
-        .next()
-        .expect("no remote connection found")
-        .clone();
-    remote_tx.send(data[..len].to_vec()).await?;
     Ok(())
 }
 
@@ -84,7 +92,15 @@ async fn process_remote_data(
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // read from remote and pass to tunnel client
-    println!("remote in: {:?}", String::from_utf8(data[..len].to_vec()));
+
+    let frame = structures::FrameData {
+        connection_id: 0,
+        seq: 0,
+        length: len as u32,
+        data: data[..len].to_vec(),
+    };
+    println!("data send: {:?}", frame);
+
     let tunn_tx = tunn_senders
         .lock()
         .unwrap()
@@ -92,7 +108,7 @@ async fn process_remote_data(
         .next()
         .unwrap()
         .clone();
-    tunn_tx.send(data[..len].to_vec()).await?;
+    tunn_tx.send(frame.to_bytes_with_header().to_vec()).await?;
     Ok(())
 }
 
@@ -129,12 +145,25 @@ async fn read_client_loop(
     println!("start read_client_loop");
     let mut buf = [0; 1024];
     loop {
-        let len = socket_reader.read(&mut buf).await?;
-        println!("read from client");
-        if len == 0 {
+        let total_length = socket_reader.read(&mut buf).await?;
+        if total_length == 0 {
             break;
         }
-        process_client_data(buf, len, remote_senders.clone(), tunn_senders.clone()).await?;
+        let mut offset = 0;
+        loop {
+            if total_length - offset < 4 {
+                panic!("too short frame")
+            }
+            let frame_length = structures::get_frame_length(&buf[offset..total_length]);
+            if offset + frame_length > total_length {
+                panic!("too short frame")
+            }
+            process_client_data(buf, offset, remote_senders.clone(), tunn_senders.clone()).await?;
+            offset = offset + frame_length;
+            if total_length - offset < 4 {
+                break;
+            }
+        }
     }
     println!("end read_client_loop");
     Ok(())
@@ -146,9 +175,7 @@ async fn write_client_loop(
 ) -> io::Result<()> {
     println!("start write_client_loop");
     while let Some(res) = sender_rx.recv().await {
-        println!("write to client: {:?}", String::from_utf8(res.clone()));
         socket_writer.write_all(&res).await?;
-        println!("write to client done")
     }
     println!("end write_client_loop");
     Ok(())
@@ -192,7 +219,6 @@ async fn read_remote_loop(
     let mut buf = [0; 1024];
     loop {
         let len = remote_socket_reader.read(&mut buf).await?;
-        println!("read from remote");
         if len == 0 {
             break;
         }
@@ -208,7 +234,6 @@ async fn write_remote_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start write_remote_loop");
     while let Some(buf) = sender_rx.recv().await {
-        println!("write to tunnel: {:?}", String::from_utf8(buf.clone()));
         remote_socket_writer.write_all(&buf).await?;
     }
     println!("end write_remote_loop");
