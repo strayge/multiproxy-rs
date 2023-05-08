@@ -9,6 +9,8 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Sender};
 
+const MAX_FRAME_SIZE: usize = 256;
+
 #[derive(Parser)]
 #[command(long_about = None)]
 struct Cli {
@@ -69,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn process_client_data(
-    data: [u8; 1024],
+    data: [u8; MAX_FRAME_SIZE],
     len: usize,
     id: u32,
     seq: u32,
@@ -114,7 +116,7 @@ async fn process_client_data(
 }
 
 async fn process_tunnel_data(
-    data: [u8; 1024],
+    data: Vec<u8>,
     offset: usize,
     conn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -180,22 +182,40 @@ async fn read_tunnel_loop(
     conn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start read_tunnel_loop");
-    let mut buf = [0; 1024];
+    let mut prefix = Vec::new();
     loop {
-        let total_length = tunnel_socket_reader.read(&mut buf).await?;
+        let mut read_buf = [0; MAX_FRAME_SIZE];
+        let mut total_length = tunnel_socket_reader.read(&mut read_buf).await?;
         if total_length == 0 {
             break;
+        }
+        let mut buf = Vec::new();
+        let prefix_length = prefix.len();
+        if prefix_length > 0 {
+            buf.extend_from_slice(&prefix[..prefix_length]);
+            buf.extend_from_slice(&read_buf[..total_length]);
+            total_length = total_length + prefix_length;
+            prefix.clear();
+        }
+        else {
+            buf.extend_from_slice(&read_buf[..total_length]);
         }
         let mut offset = 0;
         loop {
             if total_length - offset < 4 {
-                panic!("too short frame")
+                if offset < total_length {
+                    prefix = buf[offset..total_length].to_vec();
+                }
+                break;
             }
             let frame_length = structures::get_frame_length(&buf[offset..total_length]);
             if offset + frame_length > total_length {
-                panic!("too short frame")
+                if offset < total_length {
+                    prefix = buf[offset..total_length].to_vec();
+                }
+                break;
             }
-            process_tunnel_data(buf, offset, conn_senders.clone()).await?;
+            process_tunnel_data(buf.clone(), offset, conn_senders.clone()).await?;
             offset = offset + frame_length;
             if total_length - offset < 4 {
                 break;
@@ -247,7 +267,7 @@ async fn read_client_loop(
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start read_client_loop");
-    let mut buf = [0; 1024];
+    let mut buf = [0; MAX_FRAME_SIZE];
     let mut is_first_data = true;
     let mut seq = 0;
     loop {
