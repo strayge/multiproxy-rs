@@ -37,6 +37,7 @@ pub fn get_frame_type(bytes: &[u8]) -> FrameType {
 #[derive(Debug)]
 pub struct FrameBindRequest {
     pub connection_id: u32,
+    pub seq: u32,
     pub dest_host: String,
     pub dest_port: u16,
 }
@@ -45,6 +46,7 @@ impl FrameBindRequest {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = vec![];
         bytes.extend_from_slice(&self.connection_id.to_be_bytes());
+        bytes.extend_from_slice(&self.seq.to_be_bytes());
         bytes.extend_from_slice(&(self.dest_host.len() as u16).to_be_bytes());
         bytes.extend_from_slice(self.dest_host.as_bytes());
         bytes.extend_from_slice(&self.dest_port.to_be_bytes());
@@ -55,6 +57,8 @@ impl FrameBindRequest {
         let mut offset = 6;
         let connection_id = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
         offset += 4;
+        let seq = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        offset += 4;
         let dest_host_len = u16::from_be_bytes(bytes[offset..offset + 2].try_into().unwrap());
         offset += 2;
         let dest_host =
@@ -63,6 +67,7 @@ impl FrameBindRequest {
         let dest_port = u16::from_be_bytes(bytes[offset..offset + 2].try_into().unwrap());
         Self {
             connection_id,
+            seq,
             dest_host,
             dest_port,
         }
