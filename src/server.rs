@@ -31,16 +31,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
+    let tunns_per_client: Arc<Mutex<HashMap<u32, Vec<u32>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+
     let listener = TcpListener::bind((args.listen, args.port)).await.unwrap();
     while let Ok((client_socket, _)) = listener.accept().await {
         let (sender_tx, sender_rx) = mpsc::channel(100);
-        // TODO: get somehow different ids
-        tunn_senders.lock().unwrap().insert(0, sender_tx);
+
+        let tunn_id = rand::random::<u32>();
+        tunn_senders.lock().unwrap().insert(tunn_id, sender_tx);
 
         let remote_senders = remote_senders.clone();
         let tunn_senders = tunn_senders.clone();
+        let tunns_per_client = tunns_per_client.clone();
         tokio::spawn(async move {
-            handle_client_connection(client_socket, sender_rx, remote_senders, tunn_senders)
+            handle_client_connection(
+                client_socket, sender_rx, remote_senders, tunn_senders, tunn_id,
+                tunns_per_client,
+            )
                 .await
                 .unwrap();
         });
@@ -53,40 +61,64 @@ async fn process_client_data(
     offset: usize,
     remote_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+    tunn_id: u32,
+    tunns_per_client: Arc<Mutex<HashMap<u32, Vec<u32>>>>,
+    mut auth_success: bool,
+    mut client_id: u32,
+) -> Result<(bool, u32), Box<dyn std::error::Error>> {
     // read from tunnel client and pass to remotes
 
     let frame_type = structures::get_frame_type(&data[offset..]);
     match frame_type {
         structures::FrameType::BindRequest => {
+            if !auth_success {
+                panic!("auth required")
+            }
             let frame = structures::FrameBindRequest::from_bytes(&data[offset..]);
-            println!("bind recv: {:?}", frame);
+            println!("bind recv[{:?}]: {:?}", tunn_id, frame);
             create_remote_conn(
                 frame.connection_id,
                 frame.dest_host,
                 frame.dest_port,
                 remote_senders.clone(),
                 tunn_senders.clone(),
+                tunns_per_client.clone(),
+                client_id,
             )
             .await?;
         }
         structures::FrameType::Data => {
+            if !auth_success {
+                panic!("auth required")
+            }
             let frame = structures::FrameData::from_bytes(&data[offset..]);
-            println!("data recv: {:?}", frame);
-            let remote_tx = remote_senders
-                .lock()
-                .unwrap()
-                .values()
-                .next()
-                .expect("no remote connection found")
-                .clone();
+            println!("data recv[{:?}]: {:?}", tunn_id, frame);
+            let connection_id = frame.connection_id;
+            let remote_tx = {
+                let remote_senders = remote_senders.lock().unwrap();
+                remote_senders.get(&connection_id).unwrap().clone()
+            };
             remote_tx.send(frame.data).await?;
+        }
+        structures::FrameType::Auth => {
+            let frame = structures::FrameAuth::from_bytes(&data[offset..]);
+            println!("auth recv[{:?}]: {:?}", tunn_id, frame);
+            auth_success = true;
+            client_id = frame.client_id;
+            let mut tunns_per_client = tunns_per_client.lock().unwrap();
+            if !tunns_per_client.contains_key(&frame.client_id) {
+                tunns_per_client.insert(frame.client_id, vec![]);
+            }
+            tunns_per_client
+                .get_mut(&frame.client_id)
+                .unwrap()
+                .push(tunn_id);
         }
         _ => {
             panic!("unknown frame type")
         }
     }
-    Ok(())
+    Ok((auth_success, client_id))
 }
 
 async fn process_remote_data(
@@ -95,6 +127,8 @@ async fn process_remote_data(
     connection_id: u32,
     seq: u32,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
+    tunns_per_client: Arc<Mutex<HashMap<u32, Vec<u32>>>>,
+    client_id: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // read from remote and pass to tunnel client
 
@@ -106,13 +140,16 @@ async fn process_remote_data(
     };
     println!("data send: {:?}", frame);
 
-    let tunn_tx = tunn_senders
-        .lock()
-        .unwrap()
-        .values()
-        .next()
-        .unwrap()
-        .clone();
+    let tunn_tx = {
+        let tunns_per_client = tunns_per_client.lock().unwrap();
+        let tunn_ids = tunns_per_client.get(&client_id).unwrap();
+        let tunnel_number = seq as usize % tunn_ids.len();
+        let tunn_id = tunn_ids[tunnel_number];
+        let tunn_senders = tunn_senders.lock().unwrap();
+        let tunn_tx = tunn_senders.get(&tunn_id).unwrap().clone();
+        tunn_tx
+    };
+
     tunn_tx.send(frame.to_bytes_with_header().to_vec()).await?;
     Ok(())
 }
@@ -122,12 +159,17 @@ async fn handle_client_connection(
     mut sender_rx: Receiver<Vec<u8>>,
     remote_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
+    tunn_id: u32,
+    tunns_per_client: Arc<Mutex<HashMap<u32, Vec<u32>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (socket_reader, socket_writer) = client_socket.into_split();
 
     tokio::spawn(async move {
         if let Err(err) =
-            read_client_loop(socket_reader, remote_senders.clone(), tunn_senders.clone()).await
+            read_client_loop(
+                socket_reader, remote_senders.clone(), tunn_senders.clone(), tunn_id,
+                tunns_per_client,
+            ).await
         {
             println!("read_client_loop error: {}", err);
         }
@@ -146,9 +188,13 @@ async fn read_client_loop(
     mut socket_reader: OwnedReadHalf,
     remote_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
+    tunn_id: u32,
+    tunns_per_client: Arc<Mutex<HashMap<u32, Vec<u32>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start read_client_loop");
     let mut prefix = Vec::new();
+    let mut auth_success = false;
+    let mut client_id: u32 = 0;
     loop {
         let mut read_buf = [0; MAX_FRAME_SIZE];
         let mut total_length = socket_reader.read(&mut read_buf).await?;
@@ -181,7 +227,11 @@ async fn read_client_loop(
                 }
                 break;
             }
-            process_client_data(buf.clone(), offset, remote_senders.clone(), tunn_senders.clone()).await?;
+            let tunns_per_client = tunns_per_client.clone();
+            (auth_success, client_id) = process_client_data(
+                buf.clone(), offset, remote_senders.clone(), tunn_senders.clone(), tunn_id,
+                tunns_per_client, auth_success, client_id,
+            ).await?;
             offset = offset + frame_length;
             if total_length - offset < 4 {
                 break;
@@ -210,20 +260,20 @@ async fn create_remote_conn(
     port: u16,
     remote_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
+    tunns_per_client: Arc<Mutex<HashMap<u32, Vec<u32>>>>,
+    client_id: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tunnel = TcpStream::connect(format!("{}:{}", hostname, port)).await?;
     let (remote_socket_reader, remote_socket_writer) = tunnel.into_split();
 
-    let remote_id = rand::random::<u32>();
-
     let (sender_tx, mut sender_rx) = mpsc::channel(100);
-    remote_senders.lock().unwrap().insert(remote_id, sender_tx);
+    remote_senders.lock().unwrap().insert(connection_id, sender_tx);
 
     let tunn_senders = tunn_senders.clone();
 
     tokio::spawn(async move {
         if let Err(err) = read_remote_loop(
-            remote_socket_reader, tunn_senders, connection_id,
+            remote_socket_reader, tunn_senders, connection_id, tunns_per_client, client_id,
         ).await {
             println!("read_remote_loop error: {}", err);
         }
@@ -241,6 +291,8 @@ async fn read_remote_loop(
     mut remote_socket_reader: OwnedReadHalf,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     connection_id: u32,
+    tunns_per_client: Arc<Mutex<HashMap<u32, Vec<u32>>>>,
+    client_id: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start read_remote_loop");
     let mut buf = [0; MAX_FRAME_SIZE];
@@ -250,7 +302,10 @@ async fn read_remote_loop(
         if len == 0 {
             break;
         }
-        process_remote_data(buf, len, connection_id, seq, tunn_senders.clone()).await?;
+        process_remote_data(
+            buf, len, connection_id, seq, tunn_senders.clone(), tunns_per_client.clone(),
+            client_id,
+        ).await?;
         seq = seq + 1;
     }
     println!("end read_remote_loop");
