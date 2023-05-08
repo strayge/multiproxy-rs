@@ -76,7 +76,7 @@ async fn process_client_data(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // TODO: make func build frames and to send to free tunnel
     println!("client in: {:?}", String::from_utf8(data[..len].to_vec()));
-    let tunn_tx = tunn_senders.lock().unwrap().get(&0).unwrap().clone();
+    let tunn_tx = tunn_senders.lock().unwrap().values().next().unwrap().clone();
     tunn_tx.send(data[..len].to_vec()).await?;
     Ok(())
 }

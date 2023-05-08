@@ -56,7 +56,7 @@ async fn process_client_data(
     println!("client in: {:?}", String::from_utf8(data[..len].to_vec()));
 
     // DEV: remove this and create remote connection from bind frame
-    if data[..len].to_vec() == b"connect" {
+    if data[..len].to_vec() == b"connect\n" {
         create_remote_conn(
             "ya.ru".to_string(),
             80,
@@ -64,6 +64,7 @@ async fn process_client_data(
             tunn_senders.clone(),
         )
         .await?;
+        return Ok(());
     }
 
     let remote_tx = remote_senders
@@ -71,7 +72,7 @@ async fn process_client_data(
         .unwrap()
         .values()
         .next()
-        .unwrap()
+        .expect("no remote connection found")
         .clone();
     remote_tx.send(data[..len].to_vec()).await?;
     Ok(())
