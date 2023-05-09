@@ -3,6 +3,7 @@ mod structures;
 use clap::Parser;
 use std::collections::HashMap;
 use std::io;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -61,9 +62,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let tunn_senders = tunn_senders.clone();
         tokio::spawn(async move {
-            handle_client_connection(client_socket, connection_id, sender_rx, tunn_senders)
-                .await
-                .unwrap();
+            if let Err(e) = handle_client_connection(client_socket, connection_id, sender_rx, tunn_senders).await {
+                println!("handle_client_connection error occurred; error = {:?}", e);
+            }
         });
     }
 
@@ -77,6 +78,8 @@ async fn process_client_data(
     seq: u32,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     is_first_data: bool,
+    hostname: String,
+    port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // read data from client and send to tunnel
 
@@ -91,8 +94,8 @@ async fn process_client_data(
         let frame = structures::FrameBindRequest {
             connection_id: connection_id,
             seq: 0,
-            dest_host: "ya.ru".to_string(),
-            dest_port: 80,
+            dest_host: hostname,
+            dest_port: port,
         };
         println!("bind send[{:?}]: {:?}", tunn_id, frame);
         tunn_sender.send(frame.to_bytes_with_header()).await?;
@@ -312,10 +315,63 @@ async fn handle_client_connection(
     mut sender_rx: mpsc::Receiver<Vec<u8>>,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (socket_reader, socket_writer) = client_socket.into_split();
+    let (mut socket_reader, mut socket_writer) = client_socket.into_split();
+
+    let mut init_msg = [0; 2];
+    socket_reader.read_exact(&mut init_msg).await?;
+    if init_msg[0] != 5 {
+        return Err(format!("invalid version[1]: {:?}", init_msg).into());
+    }
+    let methods_length = init_msg[1] as usize;
+    let mut methods = vec![0; methods_length];
+    socket_reader.read_exact(&mut methods).await?;
+
+    let init_reply = vec![5, 0];
+    socket_writer.write_all(&init_reply).await?;
+
+    let mut bind_msg_start = [0; 4];
+    socket_reader.read_exact(&mut bind_msg_start).await?;
+    if bind_msg_start[0] != 5 {
+        return Err(format!("invalid version[2]: {:?}", bind_msg_start).into());
+    }
+    if bind_msg_start[1] != 1 {
+        let bind_response_failed = vec![5, 7, 0, bind_msg_start[3], 0, 0, 0, 0, 0, 0];
+        socket_writer.write_all(&bind_response_failed).await?;
+        return Err("unsuppported command".into());
+    }
+    let hostname;
+    let port;
+    if bind_msg_start[3] == 3 {
+        let mut bind_hostname_len= [0; 1];
+        socket_reader.read_exact(&mut bind_hostname_len).await?;
+        let mut bind_hostname = vec![0; bind_hostname_len[0] as usize];
+        socket_reader.read_exact(&mut bind_hostname).await?;
+        let mut bind_port = [0; 2];
+        socket_reader.read_exact(&mut bind_port).await?;
+        hostname = String::from_utf8(bind_hostname)?;
+        port = u16::from_be_bytes(bind_port);
+        println!("hostname: {}, port: {}", hostname, port);
+    }
+    else if bind_msg_start[3] == 1 {
+        let mut bind_ip = [0; 4];
+        socket_reader.read_exact(&mut bind_ip).await?;
+        let mut bind_port = [0; 2];
+        socket_reader.read_exact(&mut bind_port).await?;
+        let ip = IpAddr::V4(Ipv4Addr::from(bind_ip));
+        hostname = ip.to_string();
+        port = u16::from_be_bytes(bind_port);
+        println!("ip: {}, port: {}", ip, port);
+    }
+    else {
+        return Err("invalid address type".into());
+    }
+    let bind_response = vec![5, 0, 0, bind_msg_start[3], 0, 0, 0, 0, 0, 0];
+    socket_writer.write_all(&bind_response).await?;
 
     tokio::spawn(async move {
-        if let Err(err) = read_client_loop(socket_reader, connection_id, tunn_senders).await {
+        if let Err(err) = read_client_loop(
+            socket_reader, hostname, port, connection_id, tunn_senders,
+        ).await {
             println!("read_client_loop error: {}", err);
         }
     });
@@ -331,6 +387,8 @@ async fn handle_client_connection(
 
 async fn read_client_loop(
     mut socket_reader: OwnedReadHalf,
+    hostname: String,
+    port: u16,
     connection_id: u32,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -346,6 +404,7 @@ async fn read_client_loop(
         }
         process_client_data(
             buf, len, connection_id, seq, tunn_senders.clone(), is_first_data,
+            hostname.clone(), port,
         ).await?;
         seq = seq + 1;
         is_first_data = false;
