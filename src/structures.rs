@@ -18,10 +18,8 @@ pub fn get_frame_length(bytes: &[u8]) -> usize {
     total_length as usize
 }
 
-pub fn get_frame_type(bytes: &[u8]) -> FrameType {
-    let offset = 4;
-    let frame_type = u16::from_be_bytes(bytes[offset..offset + 2].try_into().unwrap());
-    match frame_type {
+pub fn get_frame_type(number: u16) -> FrameType {
+    match number {
         0 => FrameType::Auth,
         1 => FrameType::Bind,
         2 => FrameType::Data,
@@ -50,7 +48,7 @@ impl FrameBind {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut offset = 6;
+        let mut offset = 0;
         let connection_id = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
         offset += 4;
         let seq = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
@@ -71,11 +69,11 @@ impl FrameBind {
 
     pub fn to_bytes_with_header(&self) -> Vec<u8> {
         let frame_bytes = self.to_bytes();
-        let length = frame_bytes.len() + 2;
+        let length = frame_bytes.len();
         let mut bytes = vec![];
         bytes.extend_from_slice(&FRAME_MAGIC.to_be_bytes());
-        bytes.extend_from_slice(&(length as u16).to_be_bytes());
         bytes.extend_from_slice(&(FrameType::Bind as u16).to_be_bytes());
+        bytes.extend_from_slice(&(length as u16).to_be_bytes());
         bytes.extend_from_slice(&frame_bytes);
         bytes
     }
@@ -101,7 +99,7 @@ impl FrameData {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut offset = 6;
+        let mut offset = 0;
         let connection_id = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
         offset += 4;
         let seq = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
@@ -119,11 +117,11 @@ impl FrameData {
 
     pub fn to_bytes_with_header(&self) -> Vec<u8> {
         let frame_bytes = self.to_bytes();
-        let length = frame_bytes.len() + 2;
+        let length = frame_bytes.len();
         let mut bytes = vec![];
         bytes.extend_from_slice(&FRAME_MAGIC.to_be_bytes());
-        bytes.extend_from_slice(&(length as u16).to_be_bytes());
         bytes.extend_from_slice(&(FrameType::Data as u16).to_be_bytes());
+        bytes.extend_from_slice(&(length as u16).to_be_bytes());
         bytes.extend_from_slice(&frame_bytes);
         bytes
     }
@@ -142,18 +140,18 @@ impl FrameClose {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut offset = 6;
+        let mut offset = 0;
         let connection_id = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
         Self { connection_id }
     }
 
     pub fn to_bytes_with_header(&self) -> Vec<u8> {
         let frame_bytes = self.to_bytes();
-        let length = frame_bytes.len() + 2;
+        let length = frame_bytes.len();
         let mut bytes = vec![];
         bytes.extend_from_slice(&FRAME_MAGIC.to_be_bytes());
-        bytes.extend_from_slice(&(length as u16).to_be_bytes());
         bytes.extend_from_slice(&(FrameType::Close as u16).to_be_bytes());
+        bytes.extend_from_slice(&(length as u16).to_be_bytes());
         bytes.extend_from_slice(&frame_bytes);
         bytes
     }
@@ -175,7 +173,7 @@ impl FrameAuth {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut offset = 6;
+        let mut offset = 0;
         let client_id = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
         offset += 4;
         let key = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
@@ -184,11 +182,11 @@ impl FrameAuth {
 
     pub fn to_bytes_with_header(&self) -> Vec<u8> {
         let frame_bytes = self.to_bytes();
-        let length = frame_bytes.len() + 2;
+        let length = frame_bytes.len();
         let mut bytes = vec![];
         bytes.extend_from_slice(&FRAME_MAGIC.to_be_bytes());
-        bytes.extend_from_slice(&(length as u16).to_be_bytes());
         bytes.extend_from_slice(&(FrameType::Auth as u16).to_be_bytes());
+        bytes.extend_from_slice(&(length as u16).to_be_bytes());
         bytes.extend_from_slice(&frame_bytes);
         bytes
     }

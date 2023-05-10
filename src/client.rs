@@ -119,14 +119,14 @@ async fn process_client_data(
         length: len as u32,
         data: data[..len].to_vec(),
     };
-    println!("data send[{:?}]: {:?}", tunn_id, frame);
+    println!("data send[{}]: conn_id: {}, seq: {}", tunn_id, connection_id, seq);
     tunn_sender.send(frame.to_bytes_with_header()).await?;
     Ok(())
 }
 
 async fn process_tunnel_data(
+    frame_type_num: u16,
     data: Vec<u8>,
-    offset: usize,
     conn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     last_seq: Arc<Mutex<HashMap<u32, u32>>>,
     future_data: Arc<Mutex<HashMap<u32, HashMap<u32, Vec<u8>>>>>,
@@ -134,9 +134,9 @@ async fn process_tunnel_data(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // read data from tunnel and send to client
 
-    let frame_type = structures::get_frame_type(&data[offset..]);
+    let frame_type = structures::get_frame_type(frame_type_num);
     if matches!(frame_type, structures::FrameType::Close) {
-        let frame = structures::FrameClose::from_bytes(&data[offset..]);
+        let frame = structures::FrameClose::from_bytes(&data);
         println!("close recv[{:?}]: {:?}", tunnel_id, frame);
         let connection_id = frame.connection_id;
         let conn_tx = {
@@ -144,15 +144,15 @@ async fn process_tunnel_data(
             let conn_tx = conn_senders.get(&connection_id).unwrap().clone();
             conn_tx
         };
-        conn_tx.send(vec![]).await?;
+        conn_tx.send(vec![]).await.expect("send empty msg to conn_sender failed");
         conn_senders.lock().unwrap().remove(&connection_id);
         future_data.lock().unwrap().remove(&connection_id);
         last_seq.lock().unwrap().remove(&connection_id);
         return Ok(());
     }
     if matches!(frame_type, structures::FrameType::Data) {
-        let frame = structures::FrameData::from_bytes(&data[offset..]);
-        println!("data recv[{:?}]: {:?}", tunnel_id,  frame);
+        let frame = structures::FrameData::from_bytes(&data);
+        println!("data recv[{:?}]: conn_id: {}, seq: {}", tunnel_id,  frame.connection_id, frame.seq);
         let connection_id = frame.connection_id;
         let seq = frame.seq;
 
@@ -179,7 +179,10 @@ async fn process_tunnel_data(
                 let conn_tx = conn_senders.get(&frame.connection_id).unwrap().clone();
                 conn_tx
             };
-            conn_tx.send(frame.data).await?;
+            if let Err(e) = conn_tx.send(frame.data).await {
+                println!("send to client error occurred; error = {:?}", e);
+                return Ok(());
+            }
             last_seq.lock().unwrap().insert(connection_id, seq);
             let mut next_seq = seq + 1;
             loop {
@@ -275,44 +278,17 @@ async fn read_tunnel_loop(
     tunnel_id: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start read_tunnel_loop");
-    let mut prefix = Vec::new();
     loop {
-        let mut read_buf = [0; MAX_FRAME_SIZE];
-        let mut total_length = tunnel_socket_reader.read(&mut read_buf).await?;
-        if total_length == 0 {
-            break;
+        let magic = tunnel_socket_reader.read_u16().await?;
+        if magic != structures::FRAME_MAGIC {
+            panic!("invalid magic");
         }
-        let mut buf = Vec::new();
-        let prefix_length = prefix.len();
-        if prefix_length > 0 {
-            buf.extend_from_slice(&prefix[..prefix_length]);
-            buf.extend_from_slice(&read_buf[..total_length]);
-            total_length = total_length + prefix_length;
-            prefix.clear();
-        }
-        else {
-            buf.extend_from_slice(&read_buf[..total_length]);
-        }
-        let mut offset = 0;
-        loop {
-            if total_length - offset < 4 {
-                if offset < total_length {
-                    prefix = buf[offset..total_length].to_vec();
-                }
-                break;
-            }
-            let frame_length = structures::get_frame_length(&buf[offset..total_length]);
-            if offset + frame_length > total_length {
-                if offset < total_length {
-                    prefix = buf[offset..total_length].to_vec();
-                }
-                break;
-            }
-            process_tunnel_data(buf.clone(), offset, conn_senders.clone(), last_seq.clone(), future_data.clone(), tunnel_id).await?;
-            offset = offset + frame_length;
-            if total_length - offset < 4 {
-                break;
-            }
+        let frame_type = tunnel_socket_reader.read_u16().await.expect("error read frame type");
+        let data_length = tunnel_socket_reader.read_u16().await.expect("error read frame data length");
+        let mut data_buf = vec![0; data_length as usize];
+        tunnel_socket_reader.read_exact(&mut data_buf).await.expect("error read frame data");
+        if let Err(e) = process_tunnel_data(frame_type, data_buf, conn_senders.clone(), last_seq.clone(), future_data.clone(), tunnel_id).await {
+            println!("processing frame error: {}", e);
         }
     }
     println!("end read_tunnel_loop");

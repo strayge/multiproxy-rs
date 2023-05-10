@@ -66,8 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn process_client_data(
+    frame_type_num: u16,
     data: Vec<u8>,
-    offset: usize,
     remote_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     tunn_id: u32,
@@ -79,12 +79,12 @@ async fn process_client_data(
 ) -> Result<(bool, u32), Box<dyn std::error::Error>> {
     // read from tunnel client and pass to remotes
 
-    let frame_type = structures::get_frame_type(&data[offset..]);
+    let frame_type = structures::get_frame_type(frame_type_num);
     if !auth_success && !matches!(frame_type, structures::FrameType::Auth) {
         panic!("auth required")
     }
     if matches!(frame_type, structures::FrameType::Auth) {
-        let frame = structures::FrameAuth::from_bytes(&data[offset..]);
+        let frame = structures::FrameAuth::from_bytes(&data);
         println!("auth recv[{:?}]: {:?}", tunn_id, frame);
         auth_success = true;
         client_id = frame.client_id;
@@ -99,7 +99,7 @@ async fn process_client_data(
         return Ok((auth_success, client_id));
     }
     if matches!(frame_type, structures::FrameType::Close) {
-        let frame = structures::FrameClose::from_bytes(&data[offset..]);
+        let frame = structures::FrameClose::from_bytes(&data);
         println!("close recv[{:?}]: {:?}", tunn_id, frame);
         let connection_id = frame.connection_id;
 
@@ -116,7 +116,7 @@ async fn process_client_data(
     }
 
     if matches!(frame_type, structures::FrameType::Bind) {
-        let frame = structures::FrameBind::from_bytes(&data[offset..]);
+        let frame = structures::FrameBind::from_bytes(&data);
         println!("bind recv[{:?}]: {:?}", tunn_id, frame);
         let is_some_send_before = last_seq.lock().unwrap().contains_key(&frame.connection_id);
         if is_some_send_before {
@@ -137,8 +137,8 @@ async fn process_client_data(
     }
 
     if matches!(frame_type, structures::FrameType::Data) {
-        let frame = structures::FrameData::from_bytes(&data[offset..]);
-        println!("data recv[{:?}]: {:?}", tunn_id, frame);
+        let frame = structures::FrameData::from_bytes(&data);
+        println!("data recv[{:?}]: conn_id: {}, seq: {}", tunn_id,  frame.connection_id, frame.seq);
         let connection_id = frame.connection_id;
         let seq = frame.seq;
 
@@ -214,7 +214,7 @@ async fn process_remote_data(
         length: len as u32,
         data: data[..len].to_vec(),
     };
-    println!("data send: {:?}", frame);
+    println!("data send: conn_id: {}, seq: {}", connection_id, seq);
 
     let tunn_tx = {
         let tunns_per_client = tunns_per_client.lock().unwrap();
@@ -272,54 +272,31 @@ async fn read_client_loop(
     last_seq: Arc<Mutex<HashMap<u32, u32>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start read_client_loop");
-    let mut prefix = Vec::new();
     let mut auth_success = false;
     let mut client_id: u32 = 0;
     loop {
-        let mut read_buf = [0; MAX_FRAME_SIZE];
-        let mut total_length = socket_reader.read(&mut read_buf).await?;
-        if total_length == 0 {
-            break;
+        let magic = socket_reader.read_u16().await?;
+        if magic != structures::FRAME_MAGIC {
+            dbg!(magic);
+            panic!("invalid magic");
         }
-        let mut buf = Vec::new();
-        let prefix_length = prefix.len();
-        if prefix_length > 0 {
-            buf.extend_from_slice(&prefix[..prefix_length]);
-            buf.extend_from_slice(&read_buf[..total_length]);
-            total_length = total_length + prefix_length;
-            prefix.clear();
-        }
-        else {
-            buf.extend_from_slice(&read_buf[..total_length]);
-        }
-        let mut offset = 0;
-        loop {
-            if total_length - offset < 4 {
-                if offset < total_length {
-                    prefix = buf[offset..total_length].to_vec();
-                }
-                break;
+        let frame_type = socket_reader.read_u16().await.expect("read frame type error");
+        let data_length = socket_reader.read_u16().await.expect("read frame data length error");
+        let mut data_buf = vec![0; data_length as usize];
+        socket_reader.read_exact(&mut data_buf).await.expect("read frame data error");
+        match process_client_data(
+            frame_type, data_buf, remote_senders.clone(), tunn_senders.clone(), tunn_id,
+            tunns_per_client.clone(), future_data.clone(), last_seq.clone(),
+            auth_success, client_id,
+        ).await {
+            Ok((new_success, new_client_id)) => {
+                auth_success = new_success;
+                client_id = new_client_id;
             }
-            let frame_length = structures::get_frame_length(&buf[offset..total_length]);
-            if offset + frame_length > total_length {
-                if offset < total_length {
-                    prefix = buf[offset..total_length].to_vec();
-                }
-                break;
+            Err(err) => {
+                println!("process_client_data error: {}", err);
             }
-            let tunns_per_client = tunns_per_client.clone();
-            let future_data = future_data.clone();
-            let last_seq = last_seq.clone();
-            (auth_success, client_id) = process_client_data(
-                buf.clone(), offset, remote_senders.clone(), tunn_senders.clone(), tunn_id,
-                tunns_per_client, future_data, last_seq,
-                auth_success, client_id,
-            ).await?;
-            offset = offset + frame_length;
-            if total_length - offset < 4 {
-                break;
-            }
-        }
+        };
     }
     println!("end read_client_loop");
     Ok(())
