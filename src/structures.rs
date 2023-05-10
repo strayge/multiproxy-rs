@@ -1,12 +1,10 @@
 pub const FRAME_MAGIC: u16 = 0x1234;
 
 pub enum FrameType {
-    BindRequest = 0,
-    BindResponse = 1,
+    Auth = 0,
+    Bind = 1,
     Data = 2,
-    CloseRequest = 3,
-    CloseResponse = 4,
-    Auth = 5,
+    Close = 3,
 }
 
 pub fn get_frame_length(bytes: &[u8]) -> usize {
@@ -24,25 +22,23 @@ pub fn get_frame_type(bytes: &[u8]) -> FrameType {
     let offset = 4;
     let frame_type = u16::from_be_bytes(bytes[offset..offset + 2].try_into().unwrap());
     match frame_type {
-        0 => FrameType::BindRequest,
-        1 => FrameType::BindResponse,
+        0 => FrameType::Auth,
+        1 => FrameType::Bind,
         2 => FrameType::Data,
-        3 => FrameType::CloseRequest,
-        4 => FrameType::CloseResponse,
-        5 => FrameType::Auth,
+        3 => FrameType::Close,
         _ => panic!("Unknown frame type"),
     }
 }
 
 #[derive(Debug)]
-pub struct FrameBindRequest {
+pub struct FrameBind {
     pub connection_id: u32,
     pub seq: u32,
     pub dest_host: String,
     pub dest_port: u16,
 }
 
-impl FrameBindRequest {
+impl FrameBind {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = vec![];
         bytes.extend_from_slice(&self.connection_id.to_be_bytes());
@@ -79,15 +75,12 @@ impl FrameBindRequest {
         let mut bytes = vec![];
         bytes.extend_from_slice(&FRAME_MAGIC.to_be_bytes());
         bytes.extend_from_slice(&(length as u16).to_be_bytes());
-        bytes.extend_from_slice(&(FrameType::BindRequest as u16).to_be_bytes());
+        bytes.extend_from_slice(&(FrameType::Bind as u16).to_be_bytes());
         bytes.extend_from_slice(&frame_bytes);
         bytes
     }
 }
 
-// pub struct FrameBindResponse {
-//     connection_id: u32,
-// }
 
 #[derive(Debug)]
 pub struct FrameData {
@@ -136,13 +129,36 @@ impl FrameData {
     }
 }
 
-// pub struct FrameCloseRequest {
-//     connection_id: u32,
-// }
+#[derive(Debug)]
+pub struct FrameClose {
+    pub connection_id: u32,
+}
 
-// pub struct FrameCloseResponse {
-//     connection_id: u32,
-// }
+impl FrameClose {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = vec![];
+        bytes.extend_from_slice(&self.connection_id.to_be_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let mut offset = 6;
+        let connection_id = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        Self { connection_id }
+    }
+
+    pub fn to_bytes_with_header(&self) -> Vec<u8> {
+        let frame_bytes = self.to_bytes();
+        let length = frame_bytes.len() + 2;
+        let mut bytes = vec![];
+        bytes.extend_from_slice(&FRAME_MAGIC.to_be_bytes());
+        bytes.extend_from_slice(&(length as u16).to_be_bytes());
+        bytes.extend_from_slice(&(FrameType::Close as u16).to_be_bytes());
+        bytes.extend_from_slice(&frame_bytes);
+        bytes
+    }
+}
+
 
 #[derive(Debug)]
 pub struct FrameAuth {

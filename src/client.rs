@@ -58,6 +58,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let connection_id = rand::random::<u32>();
 
         let (sender_tx, sender_rx) = mpsc::channel(100);
+
+        let conn_senders = conn_senders.clone();
         conn_senders.lock().unwrap().insert(connection_id, sender_tx);
 
         let tunn_senders = tunn_senders.clone();
@@ -78,6 +80,7 @@ async fn process_client_data(
     seq: u32,
     tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     is_first_data: bool,
+    is_close: bool,
     hostname: String,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -90,8 +93,17 @@ async fn process_client_data(
         let tunn_sender = locked_tunn_senders.get(&tunn_id).unwrap().clone();
         (tunn_id, tunn_sender)
     };
+    if is_close {
+        let frame = structures::FrameClose {
+            connection_id: connection_id,
+        };
+        println!("close send: {:?}", frame);
+        tunn_sender.send(frame.to_bytes_with_header()).await?;
+        return Ok(());
+    }
+
     if is_first_data {
-        let frame = structures::FrameBindRequest {
+        let frame = structures::FrameBind {
             connection_id: connection_id,
             seq: 0,
             dest_host: hostname,
@@ -123,73 +135,84 @@ async fn process_tunnel_data(
     // read data from tunnel and send to client
 
     let frame_type = structures::get_frame_type(&data[offset..]);
-    match frame_type {
-        structures::FrameType::Data => {
-            let frame = structures::FrameData::from_bytes(&data[offset..]);
-            println!("data recv[{:?}]: {:?}", tunnel_id,  frame);
-            let connection_id = frame.connection_id;
-            let seq = frame.seq;
+    if matches!(frame_type, structures::FrameType::Close) {
+        let frame = structures::FrameClose::from_bytes(&data[offset..]);
+        println!("close recv[{:?}]: {:?}", tunnel_id, frame);
+        let connection_id = frame.connection_id;
+        let conn_tx = {
+            let conn_senders = conn_senders.lock().unwrap();
+            let conn_tx = conn_senders.get(&connection_id).unwrap().clone();
+            conn_tx
+        };
+        conn_tx.send(vec![]).await?;
+        conn_senders.lock().unwrap().remove(&connection_id);
+        future_data.lock().unwrap().remove(&connection_id);
+        last_seq.lock().unwrap().remove(&connection_id);
+        return Ok(());
+    }
+    if matches!(frame_type, structures::FrameType::Data) {
+        let frame = structures::FrameData::from_bytes(&data[offset..]);
+        println!("data recv[{:?}]: {:?}", tunnel_id,  frame);
+        let connection_id = frame.connection_id;
+        let seq = frame.seq;
 
-            let is_some_send_before = last_seq.lock().unwrap().contains_key(&connection_id);
-            let last_send_seq = {
-                if is_some_send_before {
-                    last_seq.lock().unwrap().get(&connection_id).unwrap().clone()
-                } else {
-                    0
-                }
+        let is_some_send_before = last_seq.lock().unwrap().contains_key(&connection_id);
+        let last_send_seq = {
+            if is_some_send_before {
+                last_seq.lock().unwrap().get(&connection_id).unwrap().clone()
+            } else {
+                0
+            }
+        };
+
+        let mut should_send = false;
+        if !is_some_send_before && seq == 0 {
+            should_send = true;
+        }
+        else if is_some_send_before && seq == last_send_seq + 1 {
+            should_send = true;
+        }
+
+        if should_send {
+            let conn_tx = {
+                let conn_senders = conn_senders.lock().unwrap();
+                let conn_tx = conn_senders.get(&frame.connection_id).unwrap().clone();
+                conn_tx
             };
-
-            let mut should_send = false;
-            if !is_some_send_before && seq == 0 {
-                should_send = true;
-            }
-            else if is_some_send_before && seq == last_send_seq + 1 {
-                should_send = true;
-            }
-
-            if should_send {
-                let conn_tx = {
-                    let conn_senders = conn_senders.lock().unwrap();
-                    let conn_tx = conn_senders.get(&frame.connection_id).unwrap().clone();
-                    conn_tx
-                };
-                conn_tx.send(frame.data).await?;
-                last_seq.lock().unwrap().insert(connection_id, seq);
-                let mut next_seq = seq + 1;
-                loop {
-                    let mut future_data = future_data.lock().unwrap().clone();
-                    let future_data_conn = future_data
-                        .entry(connection_id)
-                        .or_insert(HashMap::new());
-                    if future_data_conn.contains_key(&next_seq) {
-                        let conn_tx = {
-                            let conn_senders = conn_senders.lock().unwrap();
-                            let conn_tx = conn_senders.get(&frame.connection_id).unwrap().clone();
-                            conn_tx
-                        };
-                        let data = future_data_conn.get(&next_seq).unwrap().clone();
-                        conn_tx.send(data).await?;
-                        last_seq.lock().unwrap().insert(connection_id, next_seq);
-                        future_data_conn.remove(&next_seq);
-                        next_seq = next_seq + 1;
-                        continue;
-                    }
-                    break;
-                }
-            }
-            else {
-                let mut future_data = future_data.lock().unwrap();
+            conn_tx.send(frame.data).await?;
+            last_seq.lock().unwrap().insert(connection_id, seq);
+            let mut next_seq = seq + 1;
+            loop {
+                let mut future_data = future_data.lock().unwrap().clone();
                 let future_data_conn = future_data
                     .entry(connection_id)
                     .or_insert(HashMap::new());
-                future_data_conn.insert(seq, frame.data);
+                if future_data_conn.contains_key(&next_seq) {
+                    let conn_tx = {
+                        let conn_senders = conn_senders.lock().unwrap();
+                        let conn_tx = conn_senders.get(&frame.connection_id).unwrap().clone();
+                        conn_tx
+                    };
+                    let data = future_data_conn.get(&next_seq).unwrap().clone();
+                    conn_tx.send(data).await?;
+                    last_seq.lock().unwrap().insert(connection_id, next_seq);
+                    future_data_conn.remove(&next_seq);
+                    next_seq = next_seq + 1;
+                    continue;
+                }
+                break;
             }
         }
-        _ => {
-            panic!("unknown frame type")
+        else {
+            let mut future_data = future_data.lock().unwrap();
+            let future_data_conn = future_data
+                .entry(connection_id)
+                .or_insert(HashMap::new());
+            future_data_conn.insert(seq, frame.data);
         }
+        return Ok(());
     }
-    Ok(())
+    panic!("unknown frame type");
 }
 
 async fn create_tunnel(
@@ -236,7 +259,7 @@ async fn create_tunnel(
         });
 
         tokio::spawn(async move {
-            if let Err(err) = write_tunnel_loop(tunnel_socket_writer, &mut sender_rx, i).await {
+            if let Err(err) = write_tunnel_loop(tunnel_socket_writer, &mut sender_rx).await {
                 println!("write_tunnel_loop error: {}", err);
             }
         });
@@ -299,10 +322,12 @@ async fn read_tunnel_loop(
 async fn write_tunnel_loop(
     mut tunnel_socket_writer: OwnedWriteHalf,
     sender_rx: &mut mpsc::Receiver<Vec<u8>>,
-    tunnel_id: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start write_tunnel_loop");
     while let Some(buf) = sender_rx.recv().await {
+        if buf.len() == 0 {
+            break;
+        }
         tunnel_socket_writer.write_all(&buf).await?;
     }
     println!("end write_tunnel_loop");
@@ -395,19 +420,23 @@ async fn read_client_loop(
     println!("start read_client_loop");
     let mut buf = [0; MAX_FRAME_SIZE];
     let mut is_first_data = true;
+    let mut is_close = false;
     let mut seq = 1;
 
     loop {
         let len = socket_reader.read(&mut buf).await?;
         if len == 0 {
-            break;
+            is_close = true;
         }
         process_client_data(
-            buf, len, connection_id, seq, tunn_senders.clone(), is_first_data,
+            buf, len, connection_id, seq, tunn_senders.clone(), is_first_data, is_close,
             hostname.clone(), port,
         ).await?;
         seq = seq + 1;
         is_first_data = false;
+        if is_close {
+            break;
+        }
     }
     println!("end read_client_loop");
     Ok(())
@@ -419,6 +448,9 @@ async fn write_client_loop(
 ) -> io::Result<()> {
     println!("start write_client_loop");
     while let Some(res) = sender_rx.recv().await {
+        if res.len() == 0 {
+            break;
+        }
         socket_writer.write_all(&res).await?;
     }
     println!("end write_client_loop");

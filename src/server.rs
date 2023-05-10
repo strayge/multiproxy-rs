@@ -98,9 +98,25 @@ async fn process_client_data(
             .push(tunn_id);
         return Ok((auth_success, client_id));
     }
+    if matches!(frame_type, structures::FrameType::Close) {
+        let frame = structures::FrameClose::from_bytes(&data[offset..]);
+        println!("close recv[{:?}]: {:?}", tunn_id, frame);
+        let connection_id = frame.connection_id;
 
-    if matches!(frame_type, structures::FrameType::BindRequest) {
-        let frame = structures::FrameBindRequest::from_bytes(&data[offset..]);
+        let remote_tx = remote_senders.lock().unwrap().get(&connection_id).unwrap().clone();
+        remote_tx.send(vec![]).await.unwrap();
+
+        let mut future_data = future_data.lock().unwrap();
+        future_data.remove(&connection_id);
+
+        let mut last_seq = last_seq.lock().unwrap();
+        last_seq.remove(&connection_id);
+
+        return Ok((auth_success, client_id));
+    }
+
+    if matches!(frame_type, structures::FrameType::Bind) {
+        let frame = structures::FrameBind::from_bytes(&data[offset..]);
         println!("bind recv[{:?}]: {:?}", tunn_id, frame);
         let is_some_send_before = last_seq.lock().unwrap().contains_key(&frame.connection_id);
         if is_some_send_before {
@@ -385,6 +401,10 @@ async fn write_remote_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start write_remote_loop");
     while let Some(buf) = sender_rx.recv().await {
+        if buf.len() == 0 {
+            remote_socket_writer.shutdown().await?;
+            break;
+        }
         remote_socket_writer.write_all(&buf).await?;
     }
     println!("end write_remote_loop");
