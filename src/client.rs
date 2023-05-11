@@ -1,6 +1,7 @@
 mod structures;
 
 use clap::Parser;
+use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
@@ -11,6 +12,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Sender};
 
 const MAX_FRAME_SIZE: usize = 256;
+
+lazy_static! {
+    // send data to actual clients
+    static ref CONN_SENDERS: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    // send data to to tunnel server
+    static ref TUNN_SENDERS: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>> = Arc::new(Mutex::new(HashMap::new()));
+}
 
 #[derive(Parser)]
 #[command(long_about = None)]
@@ -35,22 +44,7 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
-    // send data to actual clients
-    let conn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    // send data to to tunnel server
-    let tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    create_tunnel(
-        args.server_host,
-        args.server_port,
-        args.concurrency,
-        conn_senders.clone(),
-        tunn_senders.clone(),
-    )
-    .await?;
+    create_tunnel(args.server_host, args.server_port, args.concurrency).await?;
 
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
 
@@ -59,12 +53,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let (sender_tx, sender_rx) = mpsc::channel(100);
 
-        let conn_senders = conn_senders.clone();
-        conn_senders.lock().unwrap().insert(connection_id, sender_tx);
+        CONN_SENDERS
+            .lock()
+            .unwrap()
+            .insert(connection_id, sender_tx);
 
-        let tunn_senders = tunn_senders.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client_connection(client_socket, connection_id, sender_rx, tunn_senders).await {
+            if let Err(e) = handle_client_connection(client_socket, connection_id, sender_rx).await
+            {
                 println!("handle_client_connection error occurred; error = {:?}", e);
             }
         });
@@ -78,7 +74,6 @@ async fn process_client_data(
     len: usize,
     connection_id: u32,
     seq: u32,
-    tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     is_first_data: bool,
     is_close: bool,
     hostname: String,
@@ -87,7 +82,7 @@ async fn process_client_data(
     // read data from client and send to tunnel
 
     let (tunn_id, tunn_sender) = {
-        let locked_tunn_senders = tunn_senders.lock().unwrap();
+        let locked_tunn_senders = TUNN_SENDERS.lock().unwrap();
         let concurrency = locked_tunn_senders.len() as u32;
         let tunn_id = seq % concurrency;
         let tunn_sender = locked_tunn_senders.get(&tunn_id).unwrap().clone();
@@ -119,7 +114,10 @@ async fn process_client_data(
         length: len as u32,
         data: data[..len].to_vec(),
     };
-    println!("data send[{}]: conn_id: {}, seq: {}", tunn_id, connection_id, seq);
+    println!(
+        "data send[{}]: conn_id: {}, seq: {}",
+        tunn_id, connection_id, seq
+    );
     tunn_sender.send(frame.to_bytes_with_header()).await?;
     Ok(())
 }
@@ -127,7 +125,6 @@ async fn process_client_data(
 async fn process_tunnel_data(
     frame_type_num: u16,
     data: Vec<u8>,
-    conn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     last_seq: Arc<Mutex<HashMap<u32, u32>>>,
     future_data: Arc<Mutex<HashMap<u32, HashMap<u32, Vec<u8>>>>>,
     tunnel_id: u16,
@@ -140,26 +137,37 @@ async fn process_tunnel_data(
         println!("close recv[{:?}]: {:?}", tunnel_id, frame);
         let connection_id = frame.connection_id;
         let conn_tx = {
-            let conn_senders = conn_senders.lock().unwrap();
-            let conn_tx = conn_senders.get(&connection_id).unwrap().clone();
+            let conn_senders_unlocked = CONN_SENDERS.lock().unwrap();
+            let conn_tx = conn_senders_unlocked.get(&connection_id).unwrap().clone();
             conn_tx
         };
-        conn_tx.send(vec![]).await.expect("send empty msg to conn_sender failed");
-        conn_senders.lock().unwrap().remove(&connection_id);
+        conn_tx
+            .send(vec![])
+            .await
+            .expect("send empty msg to conn_sender failed");
+        CONN_SENDERS.lock().unwrap().remove(&connection_id);
         future_data.lock().unwrap().remove(&connection_id);
         last_seq.lock().unwrap().remove(&connection_id);
         return Ok(());
     }
     if matches!(frame_type, structures::FrameType::Data) {
         let frame = structures::FrameData::from_bytes(&data);
-        println!("data recv[{:?}]: conn_id: {}, seq: {}", tunnel_id,  frame.connection_id, frame.seq);
+        println!(
+            "data recv[{:?}]: conn_id: {}, seq: {}",
+            tunnel_id, frame.connection_id, frame.seq
+        );
         let connection_id = frame.connection_id;
         let seq = frame.seq;
 
         let is_some_send_before = last_seq.lock().unwrap().contains_key(&connection_id);
         let last_send_seq = {
             if is_some_send_before {
-                last_seq.lock().unwrap().get(&connection_id).unwrap().clone()
+                last_seq
+                    .lock()
+                    .unwrap()
+                    .get(&connection_id)
+                    .unwrap()
+                    .clone()
             } else {
                 0
             }
@@ -168,15 +176,17 @@ async fn process_tunnel_data(
         let mut should_send = false;
         if !is_some_send_before && seq == 0 {
             should_send = true;
-        }
-        else if is_some_send_before && seq == last_send_seq + 1 {
+        } else if is_some_send_before && seq == last_send_seq + 1 {
             should_send = true;
         }
 
         if should_send {
             let conn_tx = {
-                let conn_senders = conn_senders.lock().unwrap();
-                let conn_tx = conn_senders.get(&frame.connection_id).unwrap().clone();
+                let conn_senders_unlocked = CONN_SENDERS.lock().unwrap();
+                let conn_tx = conn_senders_unlocked
+                    .get(&frame.connection_id)
+                    .unwrap()
+                    .clone();
                 conn_tx
             };
             if let Err(e) = conn_tx.send(frame.data).await {
@@ -187,13 +197,14 @@ async fn process_tunnel_data(
             let mut next_seq = seq + 1;
             loop {
                 let mut future_data = future_data.lock().unwrap().clone();
-                let future_data_conn = future_data
-                    .entry(connection_id)
-                    .or_insert(HashMap::new());
+                let future_data_conn = future_data.entry(connection_id).or_insert(HashMap::new());
                 if future_data_conn.contains_key(&next_seq) {
                     let conn_tx = {
-                        let conn_senders = conn_senders.lock().unwrap();
-                        let conn_tx = conn_senders.get(&frame.connection_id).unwrap().clone();
+                        let conn_senders_unlocked = CONN_SENDERS.lock().unwrap();
+                        let conn_tx = conn_senders_unlocked
+                            .get(&frame.connection_id)
+                            .unwrap()
+                            .clone();
                         conn_tx
                     };
                     let data = future_data_conn.get(&next_seq).unwrap().clone();
@@ -205,12 +216,9 @@ async fn process_tunnel_data(
                 }
                 break;
             }
-        }
-        else {
+        } else {
             let mut future_data = future_data.lock().unwrap();
-            let future_data_conn = future_data
-                .entry(connection_id)
-                .or_insert(HashMap::new());
+            let future_data_conn = future_data.entry(connection_id).or_insert(HashMap::new());
             future_data_conn.insert(seq, frame.data);
         }
         return Ok(());
@@ -222,8 +230,6 @@ async fn create_tunnel(
     hostname: String,
     port: u16,
     number: u16,
-    conn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
-    tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client_id = rand::random::<u32>();
 
@@ -239,24 +245,27 @@ async fn create_tunnel(
         let (tunnel_socket_reader, tunnel_socket_writer) = tunnel.into_split();
 
         let (sender_tx, mut sender_rx) = mpsc::channel(100);
-        tunn_senders
+        TUNN_SENDERS.lock().unwrap().insert(i as u32, sender_tx);
+
+        let frame = structures::FrameAuth {
+            client_id: client_id,
+            key: 1234,
+        };
+        println!("auth send[{:?}]: {:?}", i, frame);
+        TUNN_SENDERS
             .lock()
             .unwrap()
-            .insert(i as u32, sender_tx);
+            .get(&(i as u32))
+            .unwrap()
+            .send(frame.to_bytes_with_header())
+            .await?;
 
-            let frame = structures::FrameAuth {
-                client_id: client_id,
-                key: 1234,
-            };
-            println!("auth send[{:?}]: {:?}", i, frame);
-            tunn_senders.lock().unwrap().get(&(i as u32)).unwrap().send(frame.to_bytes_with_header()).await?;
-
-        let conn_senders = conn_senders.clone();
         let last_seq = last_seq.clone();
         let future_data = future_data.clone();
 
         tokio::spawn(async move {
-            if let Err(err) = read_tunnel_loop(tunnel_socket_reader, conn_senders, last_seq, future_data, i).await {
+            if let Err(err) = read_tunnel_loop(tunnel_socket_reader, last_seq, future_data, i).await
+            {
                 println!("read_tunnel_loop error: {}", err);
             }
         });
@@ -272,7 +281,6 @@ async fn create_tunnel(
 
 async fn read_tunnel_loop(
     mut tunnel_socket_reader: OwnedReadHalf,
-    conn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
     last_seq: Arc<Mutex<HashMap<u32, u32>>>,
     future_data: Arc<Mutex<HashMap<u32, HashMap<u32, Vec<u8>>>>>,
     tunnel_id: u16,
@@ -283,16 +291,31 @@ async fn read_tunnel_loop(
         if magic != structures::FRAME_MAGIC {
             panic!("invalid magic");
         }
-        let frame_type = tunnel_socket_reader.read_u16().await.expect("error read frame type");
-        let data_length = tunnel_socket_reader.read_u16().await.expect("error read frame data length");
+        let frame_type = tunnel_socket_reader
+            .read_u16()
+            .await
+            .expect("error read frame type");
+        let data_length = tunnel_socket_reader
+            .read_u16()
+            .await
+            .expect("error read frame data length");
         let mut data_buf = vec![0; data_length as usize];
-        tunnel_socket_reader.read_exact(&mut data_buf).await.expect("error read frame data");
-        if let Err(e) = process_tunnel_data(frame_type, data_buf, conn_senders.clone(), last_seq.clone(), future_data.clone(), tunnel_id).await {
+        tunnel_socket_reader
+            .read_exact(&mut data_buf)
+            .await
+            .expect("error read frame data");
+        if let Err(e) = process_tunnel_data(
+            frame_type,
+            data_buf,
+            last_seq.clone(),
+            future_data.clone(),
+            tunnel_id,
+        )
+        .await
+        {
             println!("processing frame error: {}", e);
         }
     }
-    println!("end read_tunnel_loop");
-    Ok(())
 }
 
 async fn write_tunnel_loop(
@@ -314,7 +337,6 @@ async fn handle_client_connection(
     client_socket: TcpStream,
     connection_id: u32,
     mut sender_rx: mpsc::Receiver<Vec<u8>>,
-    tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut socket_reader, mut socket_writer) = client_socket.into_split();
 
@@ -343,7 +365,7 @@ async fn handle_client_connection(
     let hostname;
     let port;
     if bind_msg_start[3] == 3 {
-        let mut bind_hostname_len= [0; 1];
+        let mut bind_hostname_len = [0; 1];
         socket_reader.read_exact(&mut bind_hostname_len).await?;
         let mut bind_hostname = vec![0; bind_hostname_len[0] as usize];
         socket_reader.read_exact(&mut bind_hostname).await?;
@@ -352,8 +374,7 @@ async fn handle_client_connection(
         hostname = String::from_utf8(bind_hostname)?;
         port = u16::from_be_bytes(bind_port);
         println!("hostname: {}, port: {}", hostname, port);
-    }
-    else if bind_msg_start[3] == 1 {
+    } else if bind_msg_start[3] == 1 {
         let mut bind_ip = [0; 4];
         socket_reader.read_exact(&mut bind_ip).await?;
         let mut bind_port = [0; 2];
@@ -362,17 +383,14 @@ async fn handle_client_connection(
         hostname = ip.to_string();
         port = u16::from_be_bytes(bind_port);
         println!("ip: {}, port: {}", ip, port);
-    }
-    else {
+    } else {
         return Err("invalid address type".into());
     }
     let bind_response = vec![5, 0, 0, bind_msg_start[3], 0, 0, 0, 0, 0, 0];
     socket_writer.write_all(&bind_response).await?;
 
     tokio::spawn(async move {
-        if let Err(err) = read_client_loop(
-            socket_reader, hostname, port, connection_id, tunn_senders,
-        ).await {
+        if let Err(err) = read_client_loop(socket_reader, hostname, port, connection_id).await {
             println!("read_client_loop error: {}", err);
         }
     });
@@ -391,7 +409,6 @@ async fn read_client_loop(
     hostname: String,
     port: u16,
     connection_id: u32,
-    tunn_senders: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("start read_client_loop");
     let mut buf = [0; MAX_FRAME_SIZE];
@@ -405,9 +422,16 @@ async fn read_client_loop(
             is_close = true;
         }
         process_client_data(
-            buf, len, connection_id, seq, tunn_senders.clone(), is_first_data, is_close,
-            hostname.clone(), port,
-        ).await?;
+            buf,
+            len,
+            connection_id,
+            seq,
+            is_first_data,
+            is_close,
+            hostname.clone(),
+            port,
+        )
+        .await?;
         seq = seq + 1;
         is_first_data = false;
         if is_close {

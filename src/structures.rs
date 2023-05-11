@@ -79,7 +79,6 @@ impl FrameBind {
     }
 }
 
-
 #[derive(Debug)]
 pub struct FrameData {
     pub connection_id: u32,
@@ -140,7 +139,7 @@ impl FrameClose {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut offset = 0;
+        let offset = 0;
         let connection_id = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
         Self { connection_id }
     }
@@ -156,7 +155,6 @@ impl FrameClose {
         bytes
     }
 }
-
 
 #[derive(Debug)]
 pub struct FrameAuth {

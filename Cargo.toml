@@ -20,6 +20,7 @@ tokio = { version = "1.24.2", default-features = false, features = ["net", "macr
 async-trait = { version = "0.1.63", default-features = false }
 clap = { version = "4.2.5", features = ["derive"] }
 rand = { version = "0.8.5"}
+lazy_static = { version = "1.4.0" }
 
 [build]
 rustflags = ["-A dead_code", "-A unused_variables"]
