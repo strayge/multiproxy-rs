@@ -4,6 +4,7 @@ use crate::collections::{StorageId, StorageList, StorageSender, StorageSeqData};
 use crate::structures::Frame;
 use clap::Parser;
 use lazy_static::lazy_static;
+use log::{debug, error, info};
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -37,6 +38,13 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
+    simplelog::TermLogger::init(
+        log::LevelFilter::Debug,
+        simplelog::Config::default(),
+        simplelog::TerminalMode::Mixed,
+        simplelog::ColorChoice::Auto,
+    )?;
+
     let listener = TcpListener::bind((args.listen, args.port)).await.unwrap();
     while let Ok((client_socket, _)) = listener.accept().await {
         let (sender_tx, sender_rx) = mpsc::channel(100);
@@ -68,7 +76,7 @@ async fn process_client_data(
     }
     if matches!(frame_type, structures::FrameType::Auth) {
         let frame = structures::FrameAuth::from_bytes(&data);
-        println!("auth recv[{:?}]: {:?}", tunn_id, frame);
+        info!("auth recv[{:?}]: {:?}", tunn_id, frame);
         auth_success = true;
         client_id = frame.client_id;
         TUNNS_PER_CLIENT.insert(frame.client_id, tunn_id).await;
@@ -76,7 +84,7 @@ async fn process_client_data(
     }
     if matches!(frame_type, structures::FrameType::Close) {
         let frame = structures::FrameClose::from_bytes(&data);
-        println!("close recv[{:?}]: {:?}", tunn_id, frame);
+        info!("close recv[{:?}]: {:?}", tunn_id, frame);
         let connection_id = frame.connection_id;
         REMOTE_SENDERS.send(connection_id, vec![]).await?;
         FUTURE_DATA.remove(connection_id).await;
@@ -86,7 +94,7 @@ async fn process_client_data(
 
     if matches!(frame_type, structures::FrameType::Bind) {
         let frame = structures::FrameBind::from_bytes(&data);
-        println!("bind recv[{:?}]: {:?}", tunn_id, frame);
+        info!("bind recv[{:?}]: {:?}", tunn_id, frame);
         if LAST_SEQ.contains_key(frame.connection_id).await {
             panic!("bind request for already binded connection")
         }
@@ -103,7 +111,7 @@ async fn process_client_data(
 
     if matches!(frame_type, structures::FrameType::Data) {
         let frame = structures::FrameData::from_bytes(&data);
-        println!(
+        info!(
             "data recv[{:?}]: conn_id: {}, seq: {}",
             tunn_id, frame.connection_id, frame.seq
         );
@@ -122,10 +130,7 @@ async fn process_client_data(
         }
 
         if should_send {
-            REMOTE_SENDERS
-                .send(connection_id, frame.data)
-                .await
-                .unwrap();
+            REMOTE_SENDERS.send(connection_id, frame.data).await?;
             LAST_SEQ.insert(connection_id, seq).await;
             let mut next_seq = seq + 1;
             loop {
@@ -167,7 +172,7 @@ async fn process_remote_data(
         length: len as u32,
         data: data[..len].to_vec(),
     };
-    println!("data send: conn_id: {}, seq: {}", connection_id, seq);
+    info!("data send: conn_id: {}, seq: {}", connection_id, seq);
     let tunn_id = TUNNS_PER_CLIENT
         .get_randomized(client_id, connection_id + seq)
         .await;
@@ -191,15 +196,15 @@ async fn handle_client_connection(
         tokio::select! {
             res = read_client_loop(socket_reader, tunn_id) => {
                 if res.is_err() {
-                    println!("read_client_loop error: {}", res.err().unwrap());
+                    error!("read_client_loop error: {}", res.err().unwrap());
                 }
                 else {
-                    println!("read_client_loop end");
+                    info!("read_client_loop end");
                 }
                 token.cancel();
             }
             _ = token.cancelled() => {
-                println!("read_client_loop cancelled");
+                info!("read_client_loop cancelled");
             }
         }
     });
@@ -208,15 +213,15 @@ async fn handle_client_connection(
         tokio::select! {
             res = write_client_loop(socket_writer, &mut sender_rx) => {
                 if res.is_err() {
-                    println!("write_client_loop error: {}", res.err().unwrap());
+                    error!("write_client_loop error: {}", res.err().unwrap());
                 }
                 else {
-                    println!("read_client_loop end");
+                    info!("read_client_loop end");
                 }
                 token2.cancel();
             }
             _ = token2.cancelled() => {
-                println!("write_client_loop cancelled");
+                info!("write_client_loop cancelled");
             }
         }
     });
@@ -228,7 +233,7 @@ async fn read_client_loop(
     mut socket_reader: OwnedReadHalf,
     tunn_id: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("start read_client_loop");
+    info!("start read_client_loop");
     let mut auth_success = false;
     let mut client_id: u32 = 0;
     loop {
@@ -250,13 +255,14 @@ async fn read_client_loop(
             .read_exact(&mut data_buf)
             .await
             .expect("read frame data error");
+        debug!("client_socket read len={}", data_buf.len());
         match process_client_data(frame_type, data_buf, tunn_id, auth_success, client_id).await {
             Ok((new_success, new_client_id)) => {
                 auth_success = new_success;
                 client_id = new_client_id;
             }
             Err(err) => {
-                println!("process_client_data error: {}", err);
+                error!("process_client_data error: {}", err);
             }
         };
     }
@@ -266,11 +272,12 @@ async fn write_client_loop(
     mut socket_writer: OwnedWriteHalf,
     sender_rx: &mut Receiver<Vec<u8>>,
 ) -> io::Result<()> {
-    println!("start write_client_loop");
+    info!("start write_client_loop");
     while let Some(res) = sender_rx.recv().await {
         socket_writer.write_all(&res).await?;
+        debug!("client_socket write len={}", res.len());
     }
-    println!("end write_client_loop");
+    info!("end write_client_loop");
     Ok(())
 }
 
@@ -294,15 +301,15 @@ async fn create_remote_conn(
         tokio::select! {
             res = read_remote_loop(remote_socket_reader, connection_id, client_id) => {
                 if res.is_err() {
-                    println!("read_remote_loop error: {}", res.err().unwrap());
+                    info!("read_remote_loop error: {}", res.err().unwrap());
                 }
                 else {
-                    println!("read_remote_loop end");
+                    info!("read_remote_loop end");
                 }
                 token.cancel();
             }
             _ = token.cancelled() => {
-                println!("read_remote_loop cancelled");
+                info!("read_remote_loop cancelled");
             }
         }
     });
@@ -311,15 +318,15 @@ async fn create_remote_conn(
         tokio::select! {
             res = write_remote_loop(remote_socket_writer, &mut sender_rx) => {
                 if res.is_err() {
-                    println!("write_remote_loop error: {}", res.err().unwrap());
+                    info!("write_remote_loop error: {}", res.err().unwrap());
                 }
                 else {
-                    println!("write_remote_loop end");
+                    info!("write_remote_loop end");
                 }
                 token2.cancel();
             }
             _ = token2.cancelled() => {
-                println!("write_remote_loop cancelled");
+                info!("write_remote_loop cancelled");
             }
         }
     });
@@ -332,18 +339,19 @@ async fn read_remote_loop(
     connection_id: u32,
     client_id: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("start read_remote_loop");
+    info!("start read_remote_loop");
     let mut buf = [0; MAX_FRAME_SIZE];
     let mut seq = 0;
     loop {
         let len = remote_socket_reader.read(&mut buf).await?;
+        debug!("remote_socket read len={}", len);
+        process_remote_data(buf, len, connection_id, seq, client_id).await?;
+        seq = seq + 1;
         if len == 0 {
             break;
         }
-        process_remote_data(buf, len, connection_id, seq, client_id).await?;
-        seq = seq + 1;
     }
-    println!("end read_remote_loop");
+    info!("end read_remote_loop");
     Ok(())
 }
 
@@ -351,14 +359,14 @@ async fn write_remote_loop(
     mut remote_socket_writer: OwnedWriteHalf,
     sender_rx: &mut Receiver<Vec<u8>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("start write_remote_loop");
+    info!("start write_remote_loop");
     while let Some(buf) = sender_rx.recv().await {
         if buf.len() == 0 {
-            remote_socket_writer.shutdown().await?;
             break;
         }
         remote_socket_writer.write_all(&buf).await?;
+        debug!("remote_socket write len={}", buf.len());
     }
-    println!("end write_remote_loop");
+    info!("end write_remote_loop");
     Ok(())
 }

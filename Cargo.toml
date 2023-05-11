@@ -14,12 +14,14 @@ name = "client"
 path = "src/client.rs"
 
 [dependencies]
-tokio = { version = "1.24.2", default-features = false, features = ["net", "macros", "rt-multi-thread", "sync", "io-util"] }
+tokio = { version = "1.24.2", default-features = false, features = ["net", "macros", "rt-multi-thread", "sync", "io-util", "tracing"] }
 async-trait = { version = "0.1.63", default-features = false }
 clap = { version = "4.2.5", features = ["derive"] }
 rand = { version = "0.8.5"}
 lazy_static = { version = "1.4.0" }
 tokio-util = { version = "0.7.8" }
+log = { version = "0.4.17" }
+simplelog = { version = "0.12.1" }
 
 [build]
 rustflags = ["-A dead_code", "-A unused_variables"]

@@ -4,6 +4,7 @@ use crate::collections::{StorageId, StorageSender, StorageSeqData};
 use crate::structures::Frame;
 use clap::Parser;
 use lazy_static::lazy_static;
+use log::{debug, error, info};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -44,6 +45,13 @@ struct Cli {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
+    simplelog::TermLogger::init(
+        log::LevelFilter::Debug,
+        simplelog::Config::default(),
+        simplelog::TerminalMode::Mixed,
+        simplelog::ColorChoice::Auto,
+    )?;
+
     create_tunnel(args.server_host, args.server_port, args.concurrency).await?;
 
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
@@ -58,11 +66,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             if let Err(e) = handle_client_connection(client_socket, connection_id, sender_rx).await
             {
-                println!("handle_client_connection error occurred; error = {:?}", e);
+                error!("handle_client_connection error occurred; error = {:?}", e);
             }
         });
     }
-    println!("main loop end");
+    info!("main loop end");
 
     Ok(())
 }
@@ -87,7 +95,7 @@ async fn process_client_data(
         let frame = structures::FrameClose {
             connection_id: connection_id,
         };
-        println!("close send: {:?}", frame);
+        info!("close send: {:?}", frame);
         TUNN_SENDERS
             .send(tunn_id, frame.to_bytes_with_header())
             .await?;
@@ -101,7 +109,7 @@ async fn process_client_data(
             dest_host: hostname,
             dest_port: port,
         };
-        println!("bind send[{:?}]: {:?}", tunn_id, frame);
+        info!("bind send[{:?}]: {:?}", tunn_id, frame);
         TUNN_SENDERS
             .send(tunn_id, frame.to_bytes_with_header())
             .await?;
@@ -113,7 +121,7 @@ async fn process_client_data(
         length: len as u32,
         data: data[..len].to_vec(),
     };
-    println!(
+    info!(
         "data send[{}]: conn_id: {}, seq: {}",
         tunn_id, connection_id, seq
     );
@@ -135,7 +143,7 @@ async fn process_tunnel_data(
     let frame_type = structures::FrameType::from_number(frame_type_num);
     if matches!(frame_type, structures::FrameType::Close) {
         let frame = structures::FrameClose::from_bytes(&data);
-        println!("close recv[{:?}]: {:?}", tunnel_id, frame);
+        info!("close recv[{:?}]: {:?}", tunnel_id, frame);
         let connection_id = frame.connection_id;
         CONN_SENDERS
             .send(connection_id, vec![])
@@ -148,7 +156,7 @@ async fn process_tunnel_data(
     }
     if matches!(frame_type, structures::FrameType::Data) {
         let frame = structures::FrameData::from_bytes(&data);
-        println!(
+        info!(
             "data recv[{:?}]: conn_id: {}, seq: {}",
             tunnel_id, frame.connection_id, frame.seq
         );
@@ -170,7 +178,7 @@ async fn process_tunnel_data(
 
         if should_send {
             if let Err(e) = CONN_SENDERS.send(connection_id, frame.data).await {
-                println!("send to client error occurred; error = {:?}", e);
+                error!("send to client error occurred; error = {:?}", e);
                 return Ok(());
             }
             last_seq.insert(connection_id, seq).await;
@@ -222,7 +230,7 @@ async fn create_tunnel(
             client_id: client_id,
             key: 1234,
         };
-        println!("auth send[{:?}]: {:?}", i, frame);
+        info!("auth send[{:?}]: {:?}", i, frame);
         TUNN_SENDERS
             .send(i as u32, frame.to_bytes_with_header())
             .await?;
@@ -237,15 +245,15 @@ async fn create_tunnel(
             tokio::select! {
                 res = read_tunnel_loop(tunnel_socket_reader, last_seq, future_data, i) => {
                     if res.is_err() {
-                        println!("read_tunnel_loop error: {}", res.err().unwrap());
+                        error!("read_tunnel_loop error: {}", res.err().unwrap());
                     }
                     else {
-                        println!("read_tunnel_loop end");
+                        info!("read_tunnel_loop end");
                     }
                     token.cancel();
                 }
                 _ = token.cancelled() => {
-                    println!("read_tunnel_loop cancelled");
+                    info!("read_tunnel_loop cancelled");
                 }
             }
         });
@@ -254,15 +262,15 @@ async fn create_tunnel(
             tokio::select! {
                 res = write_tunnel_loop(tunnel_socket_writer, &mut sender_rx) => {
                     if res.is_err() {
-                        println!("write_tunnel_loop error: {}", res.err().unwrap());
+                        error!("write_tunnel_loop error: {}", res.err().unwrap());
                     }
                     else {
-                        println!("write_tunnel_loop end");
+                        info!("write_tunnel_loop end");
                     }
                     token2.cancel();
                 }
                 _ = token2.cancelled() => {
-                    println!("write_tunnel_loop cancelled");
+                    info!("write_tunnel_loop cancelled");
                 }
             }
         });
@@ -276,7 +284,7 @@ async fn read_tunnel_loop(
     future_data: StorageSeqData,
     tunnel_id: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("start read_tunnel_loop");
+    info!("start read_tunnel_loop");
     loop {
         let magic = tunnel_socket_reader.read_u16().await?;
         if magic != structures::FRAME_MAGIC {
@@ -295,6 +303,7 @@ async fn read_tunnel_loop(
             .read_exact(&mut data_buf)
             .await
             .expect("error read frame data");
+        debug!("tunnel_socket read len={}", data_buf.len());
         if let Err(e) = process_tunnel_data(
             frame_type,
             data_buf,
@@ -304,7 +313,7 @@ async fn read_tunnel_loop(
         )
         .await
         {
-            println!("processing frame error: {}", e);
+            error!("processing frame error: {}", e);
         }
     }
 }
@@ -313,14 +322,15 @@ async fn write_tunnel_loop(
     mut tunnel_socket_writer: OwnedWriteHalf,
     sender_rx: &mut mpsc::Receiver<Vec<u8>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("start write_tunnel_loop");
+    info!("start write_tunnel_loop");
     while let Some(buf) = sender_rx.recv().await {
         if buf.len() == 0 {
             break;
         }
         tunnel_socket_writer.write_all(&buf).await?;
+        debug!("tunnel_socket write len={}", buf.len());
     }
-    println!("end write_tunnel_loop");
+    info!("end write_tunnel_loop");
     Ok(())
 }
 
@@ -364,7 +374,6 @@ async fn handle_client_connection(
         socket_reader.read_exact(&mut bind_port).await?;
         hostname = String::from_utf8(bind_hostname)?;
         port = u16::from_be_bytes(bind_port);
-        println!("hostname: {}, port: {}", hostname, port);
     } else if bind_msg_start[3] == 1 {
         let mut bind_ip = [0; 4];
         socket_reader.read_exact(&mut bind_ip).await?;
@@ -373,7 +382,6 @@ async fn handle_client_connection(
         let ip = IpAddr::V4(Ipv4Addr::from(bind_ip));
         hostname = ip.to_string();
         port = u16::from_be_bytes(bind_port);
-        println!("ip: {}, port: {}", ip, port);
     } else {
         return Err("invalid address type".into());
     }
@@ -387,15 +395,15 @@ async fn handle_client_connection(
         tokio::select! {
             res = read_client_loop(socket_reader, hostname, port, connection_id) => {
                 if res.is_err() {
-                    println!("read_client_loop error: {}", res.err().unwrap());
+                    info!("read_client_loop error: {}", res.err().unwrap());
                 }
                 else {
-                    println!("read_client_loop end");
+                    info!("read_client_loop end");
                 }
                 token.cancel();
             }
             _ = token.cancelled() => {
-                println!("read_client_loop cancelled");
+                info!("read_client_loop cancelled");
             }
         }
     });
@@ -404,15 +412,15 @@ async fn handle_client_connection(
         tokio::select! {
             res = write_client_loop(socket_writer, &mut sender_rx) => {
                 if res.is_err() {
-                    println!("write_client_loop error: {}", res.err().unwrap());
+                    info!("write_client_loop error: {}", res.err().unwrap());
                 }
                 else {
-                    println!("write_client_loop end");
+                    info!("write_client_loop end");
                 }
                 token2.cancel();
             }
             _ = token2.cancelled() => {
-                println!("write_client_loop cancelled");
+                info!("write_client_loop cancelled");
             }
         }
     });
@@ -426,7 +434,7 @@ async fn read_client_loop(
     port: u16,
     connection_id: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("start read_client_loop");
+    info!("start read_client_loop");
     let mut buf = [0; MAX_FRAME_SIZE];
     let mut is_first_data = true;
     let mut is_close = false;
@@ -434,6 +442,7 @@ async fn read_client_loop(
 
     loop {
         let len = socket_reader.read(&mut buf).await?;
+        debug!("client_socket read len={}", buf.len());
         if len == 0 {
             is_close = true;
         }
@@ -454,7 +463,7 @@ async fn read_client_loop(
             break;
         }
     }
-    println!("end read_client_loop");
+    info!("end read_client_loop");
     Ok(())
 }
 
@@ -462,13 +471,14 @@ async fn write_client_loop(
     mut socket_writer: OwnedWriteHalf,
     sender_rx: &mut mpsc::Receiver<Vec<u8>>,
 ) -> io::Result<()> {
-    println!("start write_client_loop");
+    info!("start write_client_loop");
     while let Some(res) = sender_rx.recv().await {
         if res.len() == 0 {
             break;
         }
         socket_writer.write_all(&res).await?;
+        debug!("client_socket write len={}", res.len());
     }
-    println!("end write_client_loop");
+    info!("end write_client_loop");
     Ok(())
 }
