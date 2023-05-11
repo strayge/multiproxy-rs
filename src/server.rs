@@ -215,7 +215,7 @@ async fn process_remote_data(
     let tunn_tx = {
         let tunns_per_client_unlocked = TUNNS_PER_CLIENT.lock().unwrap();
         let tunn_ids = tunns_per_client_unlocked.get(&client_id).unwrap();
-        let tunnel_number = seq as usize % tunn_ids.len();
+        let tunnel_number = (connection_id + seq) as usize % tunn_ids.len();
         let tunn_id = tunn_ids[tunnel_number];
         let tunn_senders_unlocked = TUNN_SENDERS.lock().unwrap();
         let tunn_tx = tunn_senders_unlocked.get(&tunn_id).unwrap().clone();

@@ -84,7 +84,8 @@ async fn process_client_data(
     let (tunn_id, tunn_sender) = {
         let locked_tunn_senders = TUNN_SENDERS.lock().unwrap();
         let concurrency = locked_tunn_senders.len() as u32;
-        let tunn_id = seq % concurrency;
+        // 1 to desync request and response from using same tunnel
+        let tunn_id = (connection_id + seq + 1) % concurrency;
         let tunn_sender = locked_tunn_senders.get(&tunn_id).unwrap().clone();
         (tunn_id, tunn_sender)
     };
