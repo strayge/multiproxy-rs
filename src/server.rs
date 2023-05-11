@@ -1,5 +1,5 @@
 mod structures;
-
+use crate::structures::Frame;
 use clap::Parser;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
@@ -65,7 +65,7 @@ async fn process_client_data(
 ) -> Result<(bool, u32), Box<dyn std::error::Error>> {
     // read from tunnel client and pass to remotes
 
-    let frame_type = structures::get_frame_type(frame_type_num);
+    let frame_type = structures::FrameType::from_number(frame_type_num);
     if !auth_success && !matches!(frame_type, structures::FrameType::Auth) {
         panic!("auth required")
     }

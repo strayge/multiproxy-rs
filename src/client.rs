@@ -1,5 +1,5 @@
 mod structures;
-
+use crate::structures::Frame;
 use clap::Parser;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
@@ -132,7 +132,7 @@ async fn process_tunnel_data(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // read data from tunnel and send to client
 
-    let frame_type = structures::get_frame_type(frame_type_num);
+    let frame_type = structures::FrameType::from_number(frame_type_num);
     if matches!(frame_type, structures::FrameType::Close) {
         let frame = structures::FrameClose::from_bytes(&data);
         println!("close recv[{:?}]: {:?}", tunnel_id, frame);
