@@ -5,11 +5,12 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::Mutex;
 
 const MAX_FRAME_SIZE: usize = 256;
 
@@ -53,10 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let (sender_tx, sender_rx) = mpsc::channel(100);
 
-        CONN_SENDERS
-            .lock()
-            .unwrap()
-            .insert(connection_id, sender_tx);
+        CONN_SENDERS.lock().await.insert(connection_id, sender_tx);
 
         tokio::spawn(async move {
             if let Err(e) = handle_client_connection(client_socket, connection_id, sender_rx).await
@@ -65,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     }
+    println!("main loop end");
 
     Ok(())
 }
@@ -82,7 +81,7 @@ async fn process_client_data(
     // read data from client and send to tunnel
 
     let (tunn_id, tunn_sender) = {
-        let locked_tunn_senders = TUNN_SENDERS.lock().unwrap();
+        let locked_tunn_senders = TUNN_SENDERS.lock().await;
         let concurrency = locked_tunn_senders.len() as u32;
         // 1 to desync request and response from using same tunnel
         let tunn_id = (connection_id + seq + 1) % concurrency;
@@ -138,7 +137,7 @@ async fn process_tunnel_data(
         println!("close recv[{:?}]: {:?}", tunnel_id, frame);
         let connection_id = frame.connection_id;
         let conn_tx = {
-            let conn_senders_unlocked = CONN_SENDERS.lock().unwrap();
+            let conn_senders_unlocked = CONN_SENDERS.lock().await;
             let conn_tx = conn_senders_unlocked.get(&connection_id).unwrap().clone();
             conn_tx
         };
@@ -146,9 +145,9 @@ async fn process_tunnel_data(
             .send(vec![])
             .await
             .expect("send empty msg to conn_sender failed");
-        CONN_SENDERS.lock().unwrap().remove(&connection_id);
-        future_data.lock().unwrap().remove(&connection_id);
-        last_seq.lock().unwrap().remove(&connection_id);
+        CONN_SENDERS.lock().await.remove(&connection_id);
+        future_data.lock().await.remove(&connection_id);
+        last_seq.lock().await.remove(&connection_id);
         return Ok(());
     }
     if matches!(frame_type, structures::FrameType::Data) {
@@ -160,15 +159,10 @@ async fn process_tunnel_data(
         let connection_id = frame.connection_id;
         let seq = frame.seq;
 
-        let is_some_send_before = last_seq.lock().unwrap().contains_key(&connection_id);
+        let is_some_send_before = last_seq.lock().await.contains_key(&connection_id);
         let last_send_seq = {
             if is_some_send_before {
-                last_seq
-                    .lock()
-                    .unwrap()
-                    .get(&connection_id)
-                    .unwrap()
-                    .clone()
+                last_seq.lock().await.get(&connection_id).unwrap().clone()
             } else {
                 0
             }
@@ -183,7 +177,7 @@ async fn process_tunnel_data(
 
         if should_send {
             let conn_tx = {
-                let conn_senders_unlocked = CONN_SENDERS.lock().unwrap();
+                let conn_senders_unlocked = CONN_SENDERS.lock().await;
                 let conn_tx = conn_senders_unlocked
                     .get(&frame.connection_id)
                     .unwrap()
@@ -194,14 +188,14 @@ async fn process_tunnel_data(
                 println!("send to client error occurred; error = {:?}", e);
                 return Ok(());
             }
-            last_seq.lock().unwrap().insert(connection_id, seq);
+            last_seq.lock().await.insert(connection_id, seq);
             let mut next_seq = seq + 1;
             loop {
-                let mut future_data = future_data.lock().unwrap().clone();
+                let mut future_data = future_data.lock().await.clone();
                 let future_data_conn = future_data.entry(connection_id).or_insert(HashMap::new());
                 if future_data_conn.contains_key(&next_seq) {
                     let conn_tx = {
-                        let conn_senders_unlocked = CONN_SENDERS.lock().unwrap();
+                        let conn_senders_unlocked = CONN_SENDERS.lock().await;
                         let conn_tx = conn_senders_unlocked
                             .get(&frame.connection_id)
                             .unwrap()
@@ -210,7 +204,7 @@ async fn process_tunnel_data(
                     };
                     let data = future_data_conn.get(&next_seq).unwrap().clone();
                     conn_tx.send(data).await?;
-                    last_seq.lock().unwrap().insert(connection_id, next_seq);
+                    last_seq.lock().await.insert(connection_id, next_seq);
                     future_data_conn.remove(&next_seq);
                     next_seq = next_seq + 1;
                     continue;
@@ -218,7 +212,7 @@ async fn process_tunnel_data(
                 break;
             }
         } else {
-            let mut future_data = future_data.lock().unwrap();
+            let mut future_data = future_data.lock().await;
             let future_data_conn = future_data.entry(connection_id).or_insert(HashMap::new());
             future_data_conn.insert(seq, frame.data);
         }
@@ -246,7 +240,7 @@ async fn create_tunnel(
         let (tunnel_socket_reader, tunnel_socket_writer) = tunnel.into_split();
 
         let (sender_tx, mut sender_rx) = mpsc::channel(100);
-        TUNN_SENDERS.lock().unwrap().insert(i as u32, sender_tx);
+        TUNN_SENDERS.lock().await.insert(i as u32, sender_tx);
 
         let frame = structures::FrameAuth {
             client_id: client_id,
@@ -255,7 +249,7 @@ async fn create_tunnel(
         println!("auth send[{:?}]: {:?}", i, frame);
         TUNN_SENDERS
             .lock()
-            .unwrap()
+            .await
             .get(&(i as u32))
             .unwrap()
             .send(frame.to_bytes_with_header())

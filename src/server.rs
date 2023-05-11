@@ -4,11 +4,12 @@ use clap::Parser;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::Mutex;
 
 const MAX_FRAME_SIZE: usize = 256;
 
@@ -45,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (sender_tx, sender_rx) = mpsc::channel(100);
 
         let tunn_id = rand::random::<u32>();
-        TUNN_SENDERS.lock().unwrap().insert(tunn_id, sender_tx);
+        TUNN_SENDERS.lock().await.insert(tunn_id, sender_tx);
 
         tokio::spawn(async move {
             handle_client_connection(client_socket, sender_rx, tunn_id)
@@ -74,7 +75,7 @@ async fn process_client_data(
         println!("auth recv[{:?}]: {:?}", tunn_id, frame);
         auth_success = true;
         client_id = frame.client_id;
-        let mut tunns_per_client_unlocked = TUNNS_PER_CLIENT.lock().unwrap();
+        let mut tunns_per_client_unlocked = TUNNS_PER_CLIENT.lock().await;
         if !tunns_per_client_unlocked.contains_key(&frame.client_id) {
             tunns_per_client_unlocked.insert(frame.client_id, vec![]);
         }
@@ -91,16 +92,16 @@ async fn process_client_data(
 
         let remote_tx = REMOTE_SENDERS
             .lock()
-            .unwrap()
+            .await
             .get(&connection_id)
             .unwrap()
             .clone();
         remote_tx.send(vec![]).await.unwrap();
 
-        let mut future_data_unlocked = FUTURE_DATA.lock().unwrap();
+        let mut future_data_unlocked = FUTURE_DATA.lock().await;
         future_data_unlocked.remove(&connection_id);
 
-        let mut last_seq_unlocked = LAST_SEQ.lock().unwrap();
+        let mut last_seq_unlocked = LAST_SEQ.lock().await;
         last_seq_unlocked.remove(&connection_id);
 
         return Ok((auth_success, client_id));
@@ -109,7 +110,7 @@ async fn process_client_data(
     if matches!(frame_type, structures::FrameType::Bind) {
         let frame = structures::FrameBind::from_bytes(&data);
         println!("bind recv[{:?}]: {:?}", tunn_id, frame);
-        let is_some_send_before = LAST_SEQ.lock().unwrap().contains_key(&frame.connection_id);
+        let is_some_send_before = LAST_SEQ.lock().await.contains_key(&frame.connection_id);
         if is_some_send_before {
             panic!("bind request for already binded connection")
         }
@@ -120,10 +121,7 @@ async fn process_client_data(
             client_id,
         )
         .await?;
-        LAST_SEQ
-            .lock()
-            .unwrap()
-            .insert(frame.connection_id, frame.seq);
+        LAST_SEQ.lock().await.insert(frame.connection_id, frame.seq);
         return Ok((auth_success, client_id));
     }
 
@@ -136,15 +134,10 @@ async fn process_client_data(
         let connection_id = frame.connection_id;
         let seq = frame.seq;
 
-        let is_some_send_before = LAST_SEQ.lock().unwrap().contains_key(&connection_id);
+        let is_some_send_before = LAST_SEQ.lock().await.contains_key(&connection_id);
         let last_send_seq = {
             if is_some_send_before {
-                LAST_SEQ
-                    .lock()
-                    .unwrap()
-                    .get(&connection_id)
-                    .unwrap()
-                    .clone()
+                LAST_SEQ.lock().await.get(&connection_id).unwrap().clone()
             } else {
                 0
             }
@@ -157,25 +150,25 @@ async fn process_client_data(
 
         if should_send {
             let remote_tx = {
-                let remote_senders_unlocked = REMOTE_SENDERS.lock().unwrap();
+                let remote_senders_unlocked = REMOTE_SENDERS.lock().await;
                 remote_senders_unlocked.get(&connection_id).unwrap().clone()
             };
             remote_tx.send(frame.data).await?;
-            LAST_SEQ.lock().unwrap().insert(connection_id, seq);
+            LAST_SEQ.lock().await.insert(connection_id, seq);
             let mut next_seq = seq + 1;
             loop {
-                let mut future_data_unlocked = FUTURE_DATA.lock().unwrap().clone();
+                let mut future_data_unlocked = FUTURE_DATA.lock().await.clone();
                 let future_data_conn = future_data_unlocked
                     .entry(connection_id)
                     .or_insert(HashMap::new());
                 if future_data_conn.contains_key(&next_seq) {
                     let remote_tx = {
-                        let remote_senders_unlocked = REMOTE_SENDERS.lock().unwrap();
+                        let remote_senders_unlocked = REMOTE_SENDERS.lock().await;
                         remote_senders_unlocked.get(&connection_id).unwrap().clone()
                     };
                     let data = future_data_conn.get(&next_seq).unwrap().clone();
                     remote_tx.send(data).await?;
-                    LAST_SEQ.lock().unwrap().insert(connection_id, next_seq);
+                    LAST_SEQ.lock().await.insert(connection_id, next_seq);
                     future_data_conn.remove(&next_seq);
                     next_seq = next_seq + 1;
                     continue;
@@ -183,7 +176,7 @@ async fn process_client_data(
                 break;
             }
         } else {
-            let mut future_dat_unlocked = FUTURE_DATA.lock().unwrap();
+            let mut future_dat_unlocked = FUTURE_DATA.lock().await;
             let future_data_conn = future_dat_unlocked
                 .entry(connection_id)
                 .or_insert(HashMap::new());
@@ -213,11 +206,11 @@ async fn process_remote_data(
     println!("data send: conn_id: {}, seq: {}", connection_id, seq);
 
     let tunn_tx = {
-        let tunns_per_client_unlocked = TUNNS_PER_CLIENT.lock().unwrap();
+        let tunns_per_client_unlocked = TUNNS_PER_CLIENT.lock().await;
         let tunn_ids = tunns_per_client_unlocked.get(&client_id).unwrap();
         let tunnel_number = (connection_id + seq) as usize % tunn_ids.len();
         let tunn_id = tunn_ids[tunnel_number];
-        let tunn_senders_unlocked = TUNN_SENDERS.lock().unwrap();
+        let tunn_senders_unlocked = TUNN_SENDERS.lock().await;
         let tunn_tx = tunn_senders_unlocked.get(&tunn_id).unwrap().clone();
         tunn_tx
     };
@@ -308,10 +301,7 @@ async fn create_remote_conn(
     let (remote_socket_reader, remote_socket_writer) = tunnel.into_split();
 
     let (sender_tx, mut sender_rx) = mpsc::channel(100);
-    REMOTE_SENDERS
-        .lock()
-        .unwrap()
-        .insert(connection_id, sender_tx);
+    REMOTE_SENDERS.lock().await.insert(connection_id, sender_tx);
 
     tokio::spawn(async move {
         if let Err(err) = read_remote_loop(remote_socket_reader, connection_id, client_id).await {
