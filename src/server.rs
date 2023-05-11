@@ -9,6 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, Receiver};
+use tokio_util::sync::CancellationToken;
 
 const MAX_FRAME_SIZE: usize = 256;
 
@@ -77,7 +78,7 @@ async fn process_client_data(
         let frame = structures::FrameClose::from_bytes(&data);
         println!("close recv[{:?}]: {:?}", tunn_id, frame);
         let connection_id = frame.connection_id;
-        REMOTE_SENDERS.send(connection_id, vec![]).await.unwrap();
+        REMOTE_SENDERS.send(connection_id, vec![]).await?;
         FUTURE_DATA.remove(connection_id).await;
         LAST_SEQ.remove(connection_id).await;
         return Ok((auth_success, client_id));
@@ -183,15 +184,40 @@ async fn handle_client_connection(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (socket_reader, socket_writer) = client_socket.into_split();
 
+    let token = CancellationToken::new();
+    let token2 = token.clone();
+
     tokio::spawn(async move {
-        if let Err(err) = read_client_loop(socket_reader, tunn_id).await {
-            println!("read_client_loop error: {}", err);
+        tokio::select! {
+            res = read_client_loop(socket_reader, tunn_id) => {
+                if res.is_err() {
+                    println!("read_client_loop error: {}", res.err().unwrap());
+                }
+                else {
+                    println!("read_client_loop end");
+                }
+                token.cancel();
+            }
+            _ = token.cancelled() => {
+                println!("read_client_loop cancelled");
+            }
         }
     });
 
     tokio::spawn(async move {
-        if let Err(err) = write_client_loop(socket_writer, &mut sender_rx).await {
-            println!("write_client_loop error: {}", err);
+        tokio::select! {
+            res = write_client_loop(socket_writer, &mut sender_rx) => {
+                if res.is_err() {
+                    println!("write_client_loop error: {}", res.err().unwrap());
+                }
+                else {
+                    println!("read_client_loop end");
+                }
+                token2.cancel();
+            }
+            _ = token2.cancelled() => {
+                println!("write_client_loop cancelled");
+            }
         }
     });
 
@@ -261,17 +287,43 @@ async fn create_remote_conn(
 
     REMOTE_SENDERS.insert(connection_id, sender_tx).await;
 
+    let token = CancellationToken::new();
+    let token2 = token.clone();
+
     tokio::spawn(async move {
-        if let Err(err) = read_remote_loop(remote_socket_reader, connection_id, client_id).await {
-            println!("read_remote_loop error: {}", err);
+        tokio::select! {
+            res = read_remote_loop(remote_socket_reader, connection_id, client_id) => {
+                if res.is_err() {
+                    println!("read_remote_loop error: {}", res.err().unwrap());
+                }
+                else {
+                    println!("read_remote_loop end");
+                }
+                token.cancel();
+            }
+            _ = token.cancelled() => {
+                println!("read_remote_loop cancelled");
+            }
         }
     });
 
     tokio::spawn(async move {
-        if let Err(err) = write_remote_loop(remote_socket_writer, &mut sender_rx).await {
-            println!("write_remote_loop error: {}", err);
+        tokio::select! {
+            res = write_remote_loop(remote_socket_writer, &mut sender_rx) => {
+                if res.is_err() {
+                    println!("write_remote_loop error: {}", res.err().unwrap());
+                }
+                else {
+                    println!("write_remote_loop end");
+                }
+                token2.cancel();
+            }
+            _ = token2.cancelled() => {
+                println!("write_remote_loop cancelled");
+            }
         }
     });
+
     Ok(())
 }
 
