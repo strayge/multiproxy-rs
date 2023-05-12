@@ -191,7 +191,7 @@ async fn process_tunnel_data(
             last_seq.insert(connection_id, seq).await;
             let mut next_seq = seq + 1;
             loop {
-                if future_data.contains_key(next_seq).await {
+                if future_data.contains_seq(connection_id, next_seq).await {
                     let data = future_data
                         .get(connection_id, next_seq)
                         .await
