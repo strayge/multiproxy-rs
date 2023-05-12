@@ -28,6 +28,10 @@ impl StorageSender {
         self.storage.lock().await.remove(&key);
     }
 
+    pub async fn contains_key(&self, key: u32) -> bool {
+        self.storage.lock().await.contains_key(&key)
+    }
+
     pub async fn get_randomized_key(&self, offset: u32) -> Option<u32> {
         let storage = self.storage.lock().await;
         let length = storage.len();

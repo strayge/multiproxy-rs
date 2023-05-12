@@ -94,6 +94,7 @@ async fn process_client_data(
     if is_close {
         let frame = structures::FrameClose {
             connection_id: connection_id,
+            seq: seq,
         };
         info!("close send: {:?}", frame);
         TUNN_SENDERS
@@ -144,11 +145,11 @@ async fn process_tunnel_data(
     if matches!(frame_type, structures::FrameType::Close) {
         let frame = structures::FrameClose::from_bytes(&data);
         info!("close recv[{:?}]: {:?}", tunnel_id, frame);
+        // close frame received, there are 2 possibilities:
+        // 1. we initialized closing, remote connection closed, CONN_SENDERS cleaned up
+        // 2. server initialized closing, need full cleanup
         let connection_id = frame.connection_id;
-        CONN_SENDERS
-            .send(connection_id, vec![])
-            .await
-            .expect("empty msg send error");
+        CONN_SENDERS.send(connection_id, vec![]).await.ok();
         CONN_SENDERS.remove(connection_id).await;
         future_data.remove(connection_id).await;
         last_seq.remove(connection_id).await;
@@ -162,6 +163,11 @@ async fn process_tunnel_data(
         );
         let connection_id = frame.connection_id;
         let seq = frame.seq;
+        let is_already_closed = !CONN_SENDERS.contains_key(connection_id).await;
+        if is_already_closed {
+            debug!("already closed, data frame ignore");
+            return Ok(());
+        }
 
         let is_some_send_before = last_seq.contains_key(connection_id).await;
         let mut last_send_seq: u32 = 0;
@@ -181,6 +187,7 @@ async fn process_tunnel_data(
                 error!("send to client error occurred; error = {:?}", e);
                 return Ok(());
             }
+            debug!("send to client conn={} seq={}", connection_id, seq);
             last_seq.insert(connection_id, seq).await;
             let mut next_seq = seq + 1;
             loop {
@@ -191,6 +198,7 @@ async fn process_tunnel_data(
                         .unwrap()
                         .clone();
                     CONN_SENDERS.send(connection_id, data).await?;
+                    debug!("send to client conn={} seq={}", connection_id, seq);
                     last_seq.insert(connection_id, next_seq).await;
                     future_data.remove_seq(connection_id, next_seq).await;
                     next_seq = next_seq + 1;
@@ -341,6 +349,7 @@ async fn handle_client_connection(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut socket_reader, mut socket_writer) = client_socket.into_split();
 
+    // socks5 proxy preable (only connect method without auth)
     let mut init_msg = [0; 2];
     socket_reader.read_exact(&mut init_msg).await?;
     if init_msg[0] != 5 {
@@ -423,6 +432,11 @@ async fn handle_client_connection(
                 info!("write_client_loop cancelled");
             }
         }
+        // here client connection closed, so clean up
+        let frame = structures::FrameClose { connection_id: connection_id, seq: 0 };
+        info!("close send(?): conn_id: {}", connection_id);
+        TUNN_SENDERS.send(0, frame.to_bytes_with_header()).await.ok();
+        CONN_SENDERS.remove(connection_id).await;
     });
 
     Ok(())

@@ -15,8 +15,11 @@ use tokio_util::sync::CancellationToken;
 const MAX_FRAME_SIZE: usize = 256;
 
 lazy_static! {
+    // connection_id -> sender
     static ref REMOTE_SENDERS: StorageSender = StorageSender::new();
+    // tunn_id -> sender
     static ref TUNN_SENDERS: StorageSender = StorageSender::new();
+    // client_id -> tunn_id
     static ref TUNNS_PER_CLIENT: StorageList = StorageList::new();
     // connection_id -> seq -> data
     static ref FUTURE_DATA: StorageSeqData = StorageSeqData::new();
@@ -86,6 +89,8 @@ async fn process_client_data(
         let frame = structures::FrameClose::from_bytes(&data);
         info!("close recv[{:?}]: {:?}", tunn_id, frame);
         let connection_id = frame.connection_id;
+        info!("close send(?): {:?}", frame);
+        TUNN_SENDERS.send(tunn_id, frame.to_bytes_with_header()).await.ok();
         REMOTE_SENDERS.send(connection_id, vec![]).await?;
         FUTURE_DATA.remove(connection_id).await;
         LAST_SEQ.remove(connection_id).await;
@@ -239,7 +244,6 @@ async fn read_client_loop(
     loop {
         let magic = socket_reader.read_u16().await?;
         if magic != structures::FRAME_MAGIC {
-            dbg!(magic);
             panic!("invalid magic");
         }
         let frame_type = socket_reader
@@ -329,6 +333,13 @@ async fn create_remote_conn(
                 info!("write_remote_loop cancelled");
             }
         }
+        let frame = structures::FrameClose { connection_id: connection_id, seq: 0 };
+        let tunn_id = TUNNS_PER_CLIENT.get_randomized(client_id, 0).await.unwrap();
+        info!("close send(?): {:?}", frame);
+        TUNN_SENDERS.send(tunn_id, frame.to_bytes_with_header()).await.ok();
+        REMOTE_SENDERS.remove(connection_id).await;
+        FUTURE_DATA.remove(connection_id).await;
+        LAST_SEQ.remove(connection_id).await;
     });
 
     Ok(())
@@ -345,11 +356,11 @@ async fn read_remote_loop(
     loop {
         let len = remote_socket_reader.read(&mut buf).await?;
         debug!("remote_socket read len={}", len);
-        process_remote_data(buf, len, connection_id, seq, client_id).await?;
-        seq = seq + 1;
         if len == 0 {
             break;
         }
+        process_remote_data(buf, len, connection_id, seq, client_id).await?;
+        seq = seq + 1;
     }
     info!("end read_remote_loop");
     Ok(())

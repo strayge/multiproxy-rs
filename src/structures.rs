@@ -129,6 +129,7 @@ impl Frame for FrameData {
 #[derive(Debug)]
 pub struct FrameClose {
     pub connection_id: u32,
+    pub seq: u32,
 }
 
 impl Frame for FrameClose {
@@ -139,12 +140,14 @@ impl Frame for FrameClose {
     fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = vec![];
         bytes.extend_from_slice(&self.connection_id.to_be_bytes());
+        bytes.extend_from_slice(&self.seq.to_be_bytes());
         bytes
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
         let connection_id = read_u32(bytes, 0);
-        Self { connection_id }
+        let seq = read_u32(bytes, 4);
+        Self { connection_id, seq }
     }
 }
 
