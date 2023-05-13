@@ -1,6 +1,6 @@
 mod collections;
-mod structures;
 mod logging;
+mod structures;
 use crate::collections::{StorageId, StorageList, StorageSender, StorageSeqData};
 use crate::structures::Frame;
 use clap::Parser;

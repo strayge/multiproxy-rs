@@ -1,6 +1,6 @@
 mod collections;
-mod structures;
 mod logging;
+mod structures;
 use crate::collections::{StorageId, StorageSender, StorageSeqData};
 use crate::structures::Frame;
 use clap::Parser;
@@ -8,6 +8,7 @@ use lazy_static::lazy_static;
 use log::{debug, error, info};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
+use std::process;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
@@ -256,7 +257,9 @@ async fn create_tunnel(
                     token.cancel();
                 }
                 _ = token.cancelled() => {
-                    info!("read_tunnel_loop cancelled");
+                    error!("read_tunnel_loop cancelled");
+                    process::exit(1);
+
                 }
             }
         });
@@ -273,7 +276,8 @@ async fn create_tunnel(
                     token2.cancel();
                 }
                 _ = token2.cancelled() => {
-                    info!("write_tunnel_loop cancelled");
+                    error!("write_tunnel_loop cancelled");
+                    process::exit(1);
                 }
             }
         });
