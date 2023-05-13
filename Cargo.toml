@@ -22,6 +22,7 @@ lazy_static = { version = "1.4.0" }
 tokio-util = { version = "0.7.8" }
 log = { version = "0.4.17" }
 simplelog = { version = "0.12.1" }
+time = { version = "0.3.21" }
 
 [build]
 rustflags = ["-A dead_code", "-A unused_variables"]

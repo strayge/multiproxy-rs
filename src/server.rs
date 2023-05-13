@@ -1,5 +1,6 @@
 mod collections;
 mod structures;
+mod logging;
 use crate::collections::{StorageId, StorageList, StorageSender, StorageSeqData};
 use crate::structures::Frame;
 use clap::Parser;
@@ -40,13 +41,7 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
-
-    simplelog::TermLogger::init(
-        log::LevelFilter::Debug,
-        simplelog::Config::default(),
-        simplelog::TerminalMode::Mixed,
-        simplelog::ColorChoice::Auto,
-    )?;
+    logging::config_logging()?;
 
     let listener = TcpListener::bind((args.listen, args.port)).await.unwrap();
     while let Ok((client_socket, _)) = listener.accept().await {
