@@ -88,14 +88,9 @@ async fn process_client_data(
     let tunn_id = TUNN_SENDERS.get_randomized_key(offset).await.unwrap();
 
     if is_close {
-        let frame = structures::FrameClose {
-            connection_id: connection_id,
-            seq: seq,
-        };
+        let frame = structures::FrameClose { connection_id: connection_id, seq: seq };
         info!("close send: {:?}", frame);
-        TUNN_SENDERS
-            .send(tunn_id, frame.to_bytes_with_header())
-            .await?;
+        TUNN_SENDERS.send(tunn_id, frame.to_bytes_with_header()).await?;
         return Ok(());
     }
 
@@ -107,9 +102,7 @@ async fn process_client_data(
             dest_port: port,
         };
         info!("bind send[{:?}]: {:?}", tunn_id, frame);
-        TUNN_SENDERS
-            .send(tunn_id, frame.to_bytes_with_header())
-            .await?;
+        TUNN_SENDERS.send(tunn_id, frame.to_bytes_with_header()).await?;
     }
 
     let frame = structures::FrameData {
@@ -118,13 +111,8 @@ async fn process_client_data(
         length: len as u32,
         data: data[..len].to_vec(),
     };
-    info!(
-        "data send[{}]: conn_id: {}, seq: {}",
-        tunn_id, connection_id, seq
-    );
-    TUNN_SENDERS
-        .send(tunn_id, frame.to_bytes_with_header())
-        .await?;
+    info!("data send[{}]: conn_id: {}, seq: {}", tunn_id, connection_id, seq);
+    TUNN_SENDERS.send(tunn_id, frame.to_bytes_with_header()).await?;
     Ok(())
 }
 
@@ -153,10 +141,7 @@ async fn process_tunnel_data(
     }
     if matches!(frame_type, structures::FrameType::Data) {
         let frame = structures::FrameData::from_bytes(&data);
-        info!(
-            "data recv[{:?}]: conn_id: {}, seq: {}",
-            tunnel_id, frame.connection_id, frame.seq
-        );
+        info!("data recv[{:?}]: conn_id: {}, seq: {}", tunnel_id, frame.connection_id, frame.seq);
         let connection_id = frame.connection_id;
         let seq = frame.seq;
         let is_already_closed = !CONN_SENDERS.contains_key(connection_id).await;
@@ -188,11 +173,7 @@ async fn process_tunnel_data(
             let mut next_seq = seq + 1;
             loop {
                 if future_data.contains_seq(connection_id, next_seq).await {
-                    let data = future_data
-                        .get(connection_id, next_seq)
-                        .await
-                        .unwrap()
-                        .clone();
+                    let data = future_data.get(connection_id, next_seq).await.unwrap().clone();
                     CONN_SENDERS.send(connection_id, data).await?;
                     debug!("send to client conn={} seq={}", connection_id, seq);
                     last_seq.insert(connection_id, next_seq).await;
@@ -230,14 +211,9 @@ async fn create_tunnel(
         let (sender_tx, mut sender_rx) = mpsc::channel(100);
         TUNN_SENDERS.insert(i as u32, sender_tx).await;
 
-        let frame = structures::FrameAuth {
-            client_id: client_id,
-            key: 1234,
-        };
+        let frame = structures::FrameAuth { client_id: client_id, key: 1234 };
         info!("auth send[{:?}]: {:?}", i, frame);
-        TUNN_SENDERS
-            .send(i as u32, frame.to_bytes_with_header())
-            .await?;
+        TUNN_SENDERS.send(i as u32, frame.to_bytes_with_header()).await?;
 
         let last_seq = last_seq.clone();
         let future_data = future_data.clone();
@@ -264,19 +240,11 @@ async fn read_tunnel_loop(
         if magic != structures::FRAME_MAGIC {
             panic!("invalid magic");
         }
-        let frame_type = tunnel_socket_reader
-            .read_u16()
-            .await
-            .expect("error read frame type");
-        let data_length = tunnel_socket_reader
-            .read_u16()
-            .await
-            .expect("error read frame data length");
+        let frame_type = tunnel_socket_reader.read_u16().await.expect("error read frame type");
+        let data_length =
+            tunnel_socket_reader.read_u16().await.expect("error read frame data length");
         let mut data_buf = vec![0; data_length as usize];
-        tunnel_socket_reader
-            .read_exact(&mut data_buf)
-            .await
-            .expect("error read frame data");
+        tunnel_socket_reader.read_exact(&mut data_buf).await.expect("error read frame data");
         debug!("tunnel_socket read len={}", data_buf.len());
         if let Err(e) = process_tunnel_data(
             frame_type,
@@ -309,15 +277,9 @@ async fn handle_client_connection(
         read_client_loop(socket_reader, hostname, port, connection_id),
         socket::write_loop("client_loop", socket_writer, &mut sender_rx),
         {
-            let frame = structures::FrameClose {
-                connection_id: connection_id,
-                seq: 0,
-            };
+            let frame = structures::FrameClose { connection_id: connection_id, seq: 0 };
             info!("close send(?): conn_id: {}", connection_id);
-            TUNN_SENDERS
-                .send(0, frame.to_bytes_with_header())
-                .await
-                .ok();
+            TUNN_SENDERS.send(0, frame.to_bytes_with_header()).await.ok();
             CONN_SENDERS.remove(connection_id).await;
         }
     );

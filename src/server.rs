@@ -100,23 +100,15 @@ async fn process_client_data(
         if LAST_SEQ.contains_key(frame.connection_id).await {
             panic!("bind request for already binded connection")
         }
-        create_remote_conn(
-            frame.connection_id,
-            frame.dest_host,
-            frame.dest_port,
-            client_id,
-        )
-        .await?;
+        create_remote_conn(frame.connection_id, frame.dest_host, frame.dest_port, client_id)
+            .await?;
         LAST_SEQ.insert(frame.connection_id, frame.seq).await;
         return Ok((auth_success, client_id));
     }
 
     if matches!(frame_type, structures::FrameType::Data) {
         let frame = structures::FrameData::from_bytes(&data);
-        info!(
-            "data recv[{:?}]: conn_id: {}, seq: {}",
-            tunn_id, frame.connection_id, frame.seq
-        );
+        info!("data recv[{:?}]: conn_id: {}, seq: {}", tunn_id, frame.connection_id, frame.seq);
         let connection_id = frame.connection_id;
         let seq = frame.seq;
 
@@ -137,11 +129,7 @@ async fn process_client_data(
             let mut next_seq = seq + 1;
             loop {
                 if FUTURE_DATA.contains_seq(connection_id, next_seq).await {
-                    let data = FUTURE_DATA
-                        .get(connection_id, next_seq)
-                        .await
-                        .unwrap()
-                        .clone();
+                    let data = FUTURE_DATA.get(connection_id, next_seq).await.unwrap().clone();
                     REMOTE_SENDERS.send(connection_id, data).await?;
                     LAST_SEQ.insert(connection_id, next_seq).await;
                     FUTURE_DATA.remove_seq(connection_id, next_seq).await;
@@ -175,12 +163,8 @@ async fn process_remote_data(
         data: data[..len].to_vec(),
     };
     info!("data send: conn_id: {}, seq: {}", connection_id, seq);
-    let tunn_id = TUNNS_PER_CLIENT
-        .get_randomized(client_id, connection_id + seq)
-        .await;
-    TUNN_SENDERS
-        .send(tunn_id.unwrap(), frame.to_bytes_with_header())
-        .await?;
+    let tunn_id = TUNNS_PER_CLIENT.get_randomized(client_id, connection_id + seq).await;
+    TUNN_SENDERS.send(tunn_id.unwrap(), frame.to_bytes_with_header()).await?;
     Ok(())
 }
 
@@ -196,19 +180,10 @@ async fn read_client_loop(
         if magic != structures::FRAME_MAGIC {
             panic!("invalid magic");
         }
-        let frame_type = socket_reader
-            .read_u16()
-            .await
-            .expect("read frame type error");
-        let data_length = socket_reader
-            .read_u16()
-            .await
-            .expect("read frame data length error");
+        let frame_type = socket_reader.read_u16().await.expect("read frame type error");
+        let data_length = socket_reader.read_u16().await.expect("read frame data length error");
         let mut data_buf = vec![0; data_length as usize];
-        socket_reader
-            .read_exact(&mut data_buf)
-            .await
-            .expect("read frame data error");
+        socket_reader.read_exact(&mut data_buf).await.expect("read frame data error");
         debug!("client_socket read len={}", data_buf.len());
         match process_client_data(frame_type, data_buf, tunn_id, auth_success, client_id).await {
             Ok((new_success, new_client_id)) => {
@@ -240,16 +215,10 @@ async fn create_remote_conn(
         read_remote_loop(remote_socket_reader, connection_id, client_id),
         socket::write_loop("tunnel_loop", remote_socket_writer, &mut sender_rx),
         {
-            let frame = structures::FrameClose {
-                connection_id: connection_id,
-                seq: 0,
-            };
+            let frame = structures::FrameClose { connection_id: connection_id, seq: 0 };
             let tunn_id = TUNNS_PER_CLIENT.get_randomized(client_id, 0).await.unwrap();
             info!("close send(?): {:?}", frame);
-            TUNN_SENDERS
-                .send(tunn_id, frame.to_bytes_with_header())
-                .await
-                .ok();
+            TUNN_SENDERS.send(tunn_id, frame.to_bytes_with_header()).await.ok();
             REMOTE_SENDERS.remove(connection_id).await;
             FUTURE_DATA.remove(connection_id).await;
             LAST_SEQ.remove(connection_id).await;

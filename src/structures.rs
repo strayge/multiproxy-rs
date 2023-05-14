@@ -81,12 +81,7 @@ impl Frame for FrameBind {
         let dest_host_len = read_u16(bytes, 8);
         let dest_host = read_string(bytes, 10, dest_host_len);
         let dest_port = read_u16(bytes, 10 + dest_host_len as usize);
-        Self {
-            connection_id,
-            seq,
-            dest_host,
-            dest_port,
-        }
+        Self { connection_id, seq, dest_host, dest_port }
     }
 }
 
@@ -117,12 +112,7 @@ impl Frame for FrameData {
         let seq = read_u32(bytes, 4);
         let length = read_u32(bytes, 8);
         let data = read_vec_u8(bytes, 12, length);
-        Self {
-            connection_id,
-            seq,
-            length,
-            data,
-        }
+        Self { connection_id, seq, length, data }
     }
 }
 

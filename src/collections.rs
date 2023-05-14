@@ -9,15 +9,11 @@ pub struct StorageSender {
 
 impl StorageSender {
     pub fn new() -> Self {
-        Self {
-            storage: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { storage: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     pub fn clone(&self) -> Self {
-        Self {
-            storage: self.storage.clone(),
-        }
+        Self { storage: self.storage.clone() }
     }
 
     pub async fn insert(&self, key: u32, value: Sender<Vec<u8>>) {
@@ -57,15 +53,11 @@ pub struct StorageId {
 
 impl StorageId {
     pub fn new() -> Self {
-        Self {
-            storage: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { storage: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     pub fn clone(&self) -> Self {
-        Self {
-            storage: self.storage.clone(),
-        }
+        Self { storage: self.storage.clone() }
     }
 
     pub async fn insert(&self, key: u32, value: u32) {
@@ -91,15 +83,11 @@ pub struct StorageList {
 
 impl StorageList {
     pub fn new() -> Self {
-        Self {
-            storage: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { storage: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     pub fn clone(&self) -> Self {
-        Self {
-            storage: self.storage.clone(),
-        }
+        Self { storage: self.storage.clone() }
     }
 
     pub async fn insert(&self, key: u32, value: u32) {
@@ -143,15 +131,11 @@ pub struct StorageSeqData {
 
 impl StorageSeqData {
     pub fn new() -> Self {
-        Self {
-            storage: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { storage: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     pub fn clone(&self) -> Self {
-        Self {
-            storage: self.storage.clone(),
-        }
+        Self { storage: self.storage.clone() }
     }
 
     pub async fn insert(&self, key: u32, seq: u32, value: Vec<u8>) {
