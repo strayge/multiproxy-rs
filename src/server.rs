@@ -7,11 +7,10 @@ use crate::structures::Frame;
 use clap::Parser;
 use lazy_static::lazy_static;
 use log::{debug, error, info};
-use std::io;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::AsyncReadExt;
+use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::{self};
 use tokio_util::sync::CancellationToken;
 
 const MAX_FRAME_SIZE: usize = 256;
@@ -55,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         socket::create_socket_coroutines!(
             "client_loop",
             read_client_loop(socket_reader, tunn_id),
-            write_client_loop(socket_writer, &mut sender_rx),
+            socket::write_loop("client_loop", socket_writer, &mut sender_rx),
             {}
         );
     }
@@ -223,19 +222,6 @@ async fn read_client_loop(
     }
 }
 
-async fn write_client_loop(
-    mut socket_writer: OwnedWriteHalf,
-    sender_rx: &mut Receiver<Vec<u8>>,
-) -> io::Result<()> {
-    info!("start write_client_loop");
-    while let Some(res) = sender_rx.recv().await {
-        socket_writer.write_all(&res).await?;
-        debug!("client_socket write len={}", res.len());
-    }
-    info!("end write_client_loop");
-    Ok(())
-}
-
 async fn create_remote_conn(
     connection_id: u32,
     hostname: String,
@@ -252,7 +238,7 @@ async fn create_remote_conn(
     socket::create_socket_coroutines!(
         "tunnel_loop",
         read_remote_loop(remote_socket_reader, connection_id, client_id),
-        write_remote_loop(remote_socket_writer, &mut sender_rx),
+        socket::write_loop("tunnel_loop", remote_socket_writer, &mut sender_rx),
         {
             let frame = structures::FrameClose {
                 connection_id: connection_id,
@@ -290,21 +276,5 @@ async fn read_remote_loop(
         seq = seq + 1;
     }
     info!("end read_remote_loop");
-    Ok(())
-}
-
-async fn write_remote_loop(
-    mut remote_socket_writer: OwnedWriteHalf,
-    sender_rx: &mut Receiver<Vec<u8>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    info!("start write_remote_loop");
-    while let Some(buf) = sender_rx.recv().await {
-        if buf.len() == 0 {
-            break;
-        }
-        remote_socket_writer.write_all(&buf).await?;
-        debug!("remote_socket write len={}", buf.len());
-    }
-    info!("end write_remote_loop");
     Ok(())
 }

@@ -8,10 +8,9 @@ use crate::structures::Frame;
 use clap::Parser;
 use lazy_static::lazy_static;
 use log::{debug, error, info};
-use std::io;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::AsyncReadExt;
+use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self};
 use tokio_util::sync::CancellationToken;
@@ -246,7 +245,7 @@ async fn create_tunnel(
         socket::create_socket_coroutines!(
             "tunnel_loop",
             read_tunnel_loop(tunnel_socket_reader, last_seq, future_data, i),
-            write_tunnel_loop(tunnel_socket_writer, &mut sender_rx),
+            socket::write_loop("tunnel_loop", tunnel_socket_writer, &mut sender_rx),
             std::process::exit(1)
         );
     }
@@ -293,22 +292,6 @@ async fn read_tunnel_loop(
     }
 }
 
-async fn write_tunnel_loop(
-    mut tunnel_socket_writer: OwnedWriteHalf,
-    sender_rx: &mut mpsc::Receiver<Vec<u8>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    info!("start write_tunnel_loop");
-    while let Some(buf) = sender_rx.recv().await {
-        if buf.len() == 0 {
-            break;
-        }
-        tunnel_socket_writer.write_all(&buf).await?;
-        debug!("tunnel_socket write len={}", buf.len());
-    }
-    info!("end write_tunnel_loop");
-    Ok(())
-}
-
 async fn handle_client_connection(
     client_socket: TcpStream,
     connection_id: u32,
@@ -324,7 +307,7 @@ async fn handle_client_connection(
     socket::create_socket_coroutines!(
         "client_loop",
         read_client_loop(socket_reader, hostname, port, connection_id),
-        write_client_loop(socket_writer, &mut sender_rx),
+        socket::write_loop("client_loop", socket_writer, &mut sender_rx),
         {
             let frame = structures::FrameClose {
                 connection_id: connection_id,
@@ -377,21 +360,5 @@ async fn read_client_loop(
         }
     }
     info!("end read_client_loop");
-    Ok(())
-}
-
-async fn write_client_loop(
-    mut socket_writer: OwnedWriteHalf,
-    sender_rx: &mut mpsc::Receiver<Vec<u8>>,
-) -> io::Result<()> {
-    info!("start write_client_loop");
-    while let Some(res) = sender_rx.recv().await {
-        if res.len() == 0 {
-            break;
-        }
-        socket_writer.write_all(&res).await?;
-        debug!("client_socket write len={}", res.len());
-    }
-    info!("end write_client_loop");
     Ok(())
 }
