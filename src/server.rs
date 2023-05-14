@@ -1,5 +1,6 @@
 mod collections;
 mod logging;
+mod socket;
 mod structures;
 use crate::collections::{StorageId, StorageList, StorageSender, StorageSeqData};
 use crate::structures::Frame;
@@ -45,16 +46,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = TcpListener::bind((args.listen, args.port)).await.unwrap();
     while let Ok((client_socket, _)) = listener.accept().await {
-        let (sender_tx, sender_rx) = mpsc::channel(100);
+        let (sender_tx, mut sender_rx) = mpsc::channel(100);
 
         let tunn_id = rand::random::<u32>();
         TUNN_SENDERS.insert(tunn_id, sender_tx).await;
 
-        tokio::spawn(async move {
-            handle_client_connection(client_socket, sender_rx, tunn_id)
-                .await
-                .unwrap();
-        });
+        let (socket_reader, socket_writer) = client_socket.into_split();
+        socket::create_socket_coroutines!(
+            "client_loop",
+            read_client_loop(socket_reader, tunn_id),
+            write_client_loop(socket_writer, &mut sender_rx),
+            {}
+        );
     }
     Ok(())
 }
@@ -182,53 +185,6 @@ async fn process_remote_data(
     Ok(())
 }
 
-async fn handle_client_connection(
-    client_socket: TcpStream,
-    mut sender_rx: Receiver<Vec<u8>>,
-    tunn_id: u32,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (socket_reader, socket_writer) = client_socket.into_split();
-
-    let token = CancellationToken::new();
-    let token2 = token.clone();
-
-    tokio::spawn(async move {
-        tokio::select! {
-            res = read_client_loop(socket_reader, tunn_id) => {
-                if res.is_err() {
-                    error!("read_client_loop error: {}", res.err().unwrap());
-                }
-                else {
-                    info!("read_client_loop end");
-                }
-                token.cancel();
-            }
-            _ = token.cancelled() => {
-                info!("read_client_loop cancelled");
-            }
-        }
-    });
-
-    tokio::spawn(async move {
-        tokio::select! {
-            res = write_client_loop(socket_writer, &mut sender_rx) => {
-                if res.is_err() {
-                    error!("write_client_loop error: {}", res.err().unwrap());
-                }
-                else {
-                    info!("read_client_loop end");
-                }
-                token2.cancel();
-            }
-            _ = token2.cancelled() => {
-                info!("write_client_loop cancelled");
-            }
-        }
-    });
-
-    Ok(())
-}
-
 async fn read_client_loop(
     mut socket_reader: OwnedReadHalf,
     tunn_id: u32,
@@ -293,50 +249,26 @@ async fn create_remote_conn(
 
     REMOTE_SENDERS.insert(connection_id, sender_tx).await;
 
-    let token = CancellationToken::new();
-    let token2 = token.clone();
-
-    tokio::spawn(async move {
-        tokio::select! {
-            res = read_remote_loop(remote_socket_reader, connection_id, client_id) => {
-                if res.is_err() {
-                    info!("read_remote_loop error: {}", res.err().unwrap());
-                }
-                else {
-                    info!("read_remote_loop end");
-                }
-                token.cancel();
-            }
-            _ = token.cancelled() => {
-                info!("read_remote_loop cancelled");
-            }
+    socket::create_socket_coroutines!(
+        "tunnel_loop",
+        read_remote_loop(remote_socket_reader, connection_id, client_id),
+        write_remote_loop(remote_socket_writer, &mut sender_rx),
+        {
+            let frame = structures::FrameClose {
+                connection_id: connection_id,
+                seq: 0,
+            };
+            let tunn_id = TUNNS_PER_CLIENT.get_randomized(client_id, 0).await.unwrap();
+            info!("close send(?): {:?}", frame);
+            TUNN_SENDERS
+                .send(tunn_id, frame.to_bytes_with_header())
+                .await
+                .ok();
+            REMOTE_SENDERS.remove(connection_id).await;
+            FUTURE_DATA.remove(connection_id).await;
+            LAST_SEQ.remove(connection_id).await;
         }
-    });
-
-    tokio::spawn(async move {
-        tokio::select! {
-            res = write_remote_loop(remote_socket_writer, &mut sender_rx) => {
-                if res.is_err() {
-                    info!("write_remote_loop error: {}", res.err().unwrap());
-                }
-                else {
-                    info!("write_remote_loop end");
-                }
-                token2.cancel();
-            }
-            _ = token2.cancelled() => {
-                info!("write_remote_loop cancelled");
-            }
-        }
-        let frame = structures::FrameClose { connection_id: connection_id, seq: 0 };
-        let tunn_id = TUNNS_PER_CLIENT.get_randomized(client_id, 0).await.unwrap();
-        info!("close send(?): {:?}", frame);
-        TUNN_SENDERS.send(tunn_id, frame.to_bytes_with_header()).await.ok();
-        REMOTE_SENDERS.remove(connection_id).await;
-        FUTURE_DATA.remove(connection_id).await;
-        LAST_SEQ.remove(connection_id).await;
-    });
-
+    );
     Ok(())
 }
 
