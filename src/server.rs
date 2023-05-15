@@ -85,7 +85,9 @@ async fn process_client_data(
     // read from tunnel client and pass to remotes
 
     let frame_type = structures::FrameType::from_number(frame_type_num);
-    if !matches!(frame_type, structures::FrameType::Auth) && !auth_success { panic!("auth miss"); }
+    if !matches!(frame_type, structures::FrameType::Auth) && !auth_success {
+        panic!("auth miss");
+    }
     let (connection_id, seq, data) = match frame_type {
         structures::FrameType::Auth => {
             let frame = structures::FrameAuth::from_bytes(&data);
@@ -98,7 +100,9 @@ async fn process_client_data(
         structures::FrameType::Bind => {
             let frame = structures::FrameBind::from_bytes(&data);
             info!("bind recv[{:?}]: {:?}", tunnel_id, frame);
-            if LAST_SEQ.contains_key(frame.connection_id).await { panic!("second bind request"); }
+            if LAST_SEQ.contains_key(frame.connection_id).await {
+                panic!("second bind request");
+            }
             create_remote_conn(frame.connection_id, frame.dest_host, frame.dest_port, client_id)
                 .await?;
             LAST_SEQ.insert(frame.connection_id, frame.seq).await;
@@ -111,7 +115,10 @@ async fn process_client_data(
         }
         structures::FrameType::Data => {
             let frame = structures::FrameData::from_bytes(&data);
-            info!("data recv[{:?}]: conn_id: {}, seq: {}", tunnel_id, frame.connection_id, frame.seq);
+            info!(
+                "data recv[{:?}]: conn_id: {}, seq: {}",
+                tunnel_id, frame.connection_id, frame.seq
+            );
             (frame.connection_id, frame.seq, frame.data)
         }
         _ => panic!("unknown frame type"),

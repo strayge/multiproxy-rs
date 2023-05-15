@@ -76,7 +76,7 @@ impl StorageId {
         self.storage.lock().await.get(&key).cloned()
     }
 
-    pub fn storage (&self) -> Arc<Mutex<HashMap<u32, u32>>> {
+    pub fn storage(&self) -> Arc<Mutex<HashMap<u32, u32>>> {
         self.storage.clone()
     }
 }

@@ -143,7 +143,10 @@ async fn process_tunnel_data(
         }
         structures::FrameType::Data => {
             let frame = structures::FrameData::from_bytes(&data);
-            info!("data recv[{:?}]: conn_id: {}, seq: {}", tunnel_id, frame.connection_id, frame.seq);
+            info!(
+                "data recv[{:?}]: conn_id: {}, seq: {}",
+                tunnel_id, frame.connection_id, frame.seq
+            );
             (frame.connection_id, frame.seq, frame.data)
         }
         _ => panic!("unknown frame type"),
