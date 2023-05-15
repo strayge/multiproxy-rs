@@ -10,7 +10,7 @@ pub async fn write_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("start write_{}", name);
     while let Some(buf) = sender_rx.recv().await {
-        if buf.len() == 0 {
+        if buf.is_empty() {
             break;
         }
         remote_socket_writer.write_all(&buf).await?;

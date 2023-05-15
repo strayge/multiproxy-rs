@@ -121,7 +121,6 @@ async fn process_client_data(
             );
             (frame.connection_id, frame.seq, frame.data)
         }
-        _ => panic!("unknown frame type"),
     };
 
     // common code for frames with data
@@ -149,7 +148,7 @@ async fn process_client_data(
                 REMOTE_SENDERS.send(connection_id, data).await?;
                 last_seq_locked.insert(connection_id, next_seq);
                 FUTURE_DATA.remove_seq(connection_id, next_seq).await;
-                next_seq = next_seq + 1;
+                next_seq += 1;
                 continue;
             }
             break;
@@ -171,8 +170,8 @@ async fn process_remote_data(
     // not called on connection close
 
     let frame = structures::FrameData {
-        connection_id: connection_id,
-        seq: seq,
+        connection_id,
+        seq,
         length: len as u32,
         data: data[..len].to_vec(),
     };
@@ -221,7 +220,7 @@ async fn create_remote_conn(
     let tunnel = TcpStream::connect(format!("{}:{}", hostname, port)).await?;
     let (remote_socket_reader, remote_socket_writer) = tunnel.into_split();
 
-    let (mut sender_tx, mut sender_rx) = mpsc::channel(100);
+    let (sender_tx, mut sender_rx) = mpsc::channel(100);
 
     REMOTE_SENDERS.insert(connection_id, sender_tx).await;
 
@@ -232,7 +231,7 @@ async fn create_remote_conn(
         {
             // connection closed somehow
             let last_seq = LAST_SEND_SEQ.get(connection_id).await.unwrap_or(0);
-            let frame = structures::FrameClose { connection_id: connection_id, seq: last_seq + 1 };
+            let frame = structures::FrameClose { connection_id, seq: last_seq + 1 };
             let tunn_id = TUNNS_PER_CLIENT.get_randomized(client_id, 0).await.unwrap();
             info!("close send(?): {:?}", frame);
             TUNN_SENDERS.send(tunn_id, frame.to_bytes_with_header()).await.ok();
@@ -260,7 +259,7 @@ async fn read_remote_loop(
             break;
         }
         process_remote_data(buf, len, connection_id, seq, client_id).await?;
-        seq = seq + 1;
+        seq += 1;
     }
     info!("end read_remote_loop");
     Ok(())

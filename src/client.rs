@@ -86,7 +86,6 @@ async fn process_client_data(
     connection_id: u32,
     seq: u32,
     is_first_data: bool,
-    is_close: bool,
     hostname: String,
     port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -96,27 +95,16 @@ async fn process_client_data(
     let offset = connection_id + seq + 1;
     let tunn_id = TUNN_SENDERS.get_randomized_key(offset).await.unwrap();
 
-    if is_close {
-        let frame = structures::FrameClose { connection_id: connection_id, seq: seq };
-        info!("close send: {:?}", frame);
-        TUNN_SENDERS.send(tunn_id, frame.to_bytes_with_header()).await?;
-        return Ok(());
-    }
-
     if is_first_data {
-        let frame = structures::FrameBind {
-            connection_id: connection_id,
-            seq: 0,
-            dest_host: hostname,
-            dest_port: port,
-        };
+        let frame =
+            structures::FrameBind { connection_id, seq: 0, dest_host: hostname, dest_port: port };
         info!("bind send[{:?}]: {:?}", tunn_id, frame);
         TUNN_SENDERS.send(tunn_id, frame.to_bytes_with_header()).await?;
     }
 
     let frame = structures::FrameData {
-        connection_id: connection_id,
-        seq: seq,
+        connection_id,
+        seq,
         length: len as u32,
         data: data[..len].to_vec(),
     };
@@ -164,12 +152,10 @@ async fn process_tunnel_data(
     let is_some_send_before = last_seq_locked.contains_key(&connection_id);
     let mut last_send_seq: u32 = 0;
     if is_some_send_before {
-        last_send_seq = last_seq_locked.get(&connection_id).unwrap().clone();
+        last_send_seq = *last_seq_locked.get(&connection_id).unwrap();
     }
     let mut should_send = false;
-    if !is_some_send_before && seq == 0 {
-        should_send = true;
-    } else if is_some_send_before && seq == last_send_seq + 1 {
+    if (!is_some_send_before && seq == 0) || (is_some_send_before && seq == last_send_seq + 1) {
         should_send = true;
     }
 
@@ -188,7 +174,7 @@ async fn process_tunnel_data(
                 debug!("queue to client conn={} seq={}", connection_id, next_seq);
                 last_seq_locked.insert(connection_id, next_seq);
                 future_data.remove_seq(connection_id, next_seq).await;
-                next_seq = next_seq + 1;
+                next_seq += 1;
                 continue;
             }
             debug!("seq {} not found, stop sending", next_seq);
@@ -221,7 +207,7 @@ async fn create_tunnel(
         let (sender_tx, mut sender_rx) = mpsc::channel(100);
         TUNN_SENDERS.insert(i as u32, sender_tx).await;
 
-        let frame = structures::FrameAuth { client_id: client_id, key: 1234 };
+        let frame = structures::FrameAuth { client_id, key: 1234 };
         info!("auth send[{:?}]: {:?}", i, frame);
         TUNN_SENDERS.send(i as u32, frame.to_bytes_with_header()).await?;
 
@@ -275,7 +261,7 @@ async fn handle_client_connection(
     connection_id: u32,
     mut sender_rx: mpsc::Receiver<Vec<u8>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut socket_reader, mut socket_writer) = client_socket.into_split();
+    let (socket_reader, socket_writer) = client_socket.into_split();
 
     // socks5 proxy preable (only connect method without auth)
     // FIXME: is there a way to not pass socket_reader and socket_writer back?
@@ -287,7 +273,7 @@ async fn handle_client_connection(
         read_client_loop(socket_reader, hostname, port, connection_id),
         socket::write_loop("client_loop", socket_writer, &mut sender_rx),
         {
-            let frame = structures::FrameClose { connection_id: connection_id, seq: 0 };
+            let frame = structures::FrameClose { connection_id, seq: 0 };
             info!("close send(?): conn_id: {}", connection_id);
             TUNN_SENDERS.send(0, frame.to_bytes_with_header()).await.ok();
             CONN_SENDERS.remove(connection_id).await;
@@ -305,31 +291,18 @@ async fn read_client_loop(
     info!("start read_client_loop");
     let mut buf = [0; MAX_FRAME_SIZE];
     let mut is_first_data = true;
-    let mut is_close = false;
     let mut seq = 1;
 
     loop {
         let len = socket_reader.read(&mut buf).await?;
         debug!("client_socket read len={}", buf.len());
         if len == 0 {
-            is_close = true;
-        }
-        process_client_data(
-            buf,
-            len,
-            connection_id,
-            seq,
-            is_first_data,
-            is_close,
-            hostname.clone(),
-            port,
-        )
-        .await?;
-        seq = seq + 1;
-        is_first_data = false;
-        if is_close {
             break;
         }
+        process_client_data(buf, len, connection_id, seq, is_first_data, hostname.clone(), port)
+            .await?;
+        seq += 1;
+        is_first_data = false;
     }
     info!("end read_client_loop");
     Ok(())

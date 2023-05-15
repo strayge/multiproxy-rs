@@ -1,10 +1,13 @@
+#![allow(dead_code)]
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::Mutex;
 
+type ArcMutex<T> = Arc<Mutex<T>>;
+
 pub struct StorageSender {
-    storage: Arc<Mutex<HashMap<u32, Sender<Vec<u8>>>>>,
+    storage: ArcMutex<HashMap<u32, Sender<Vec<u8>>>>,
 }
 
 impl StorageSender {
@@ -48,7 +51,7 @@ impl StorageSender {
 }
 
 pub struct StorageId {
-    storage: Arc<Mutex<HashMap<u32, u32>>>,
+    storage: ArcMutex<HashMap<u32, u32>>,
 }
 
 impl StorageId {
@@ -82,7 +85,7 @@ impl StorageId {
 }
 
 pub struct StorageList {
-    storage: Arc<Mutex<HashMap<u32, Vec<u32>>>>,
+    storage: ArcMutex<HashMap<u32, Vec<u32>>>,
 }
 
 impl StorageList {
@@ -96,9 +99,7 @@ impl StorageList {
 
     pub async fn insert(&self, key: u32, value: u32) {
         let mut storage = self.storage.lock().await;
-        if !storage.contains_key(&key) {
-            storage.insert(key, vec![]);
-        }
+        storage.entry(key).or_insert(vec![]);
         let list = storage.get_mut(&key).unwrap();
         list.push(value);
     }
@@ -122,15 +123,15 @@ impl StorageList {
                 return None;
             }
             let index = (offset % length as u32) as usize;
-            return Some(list[index]);
+            Some(list[index])
         } else {
-            return None;
+            None
         }
     }
 }
 
 pub struct StorageSeqData {
-    storage: Arc<Mutex<HashMap<u32, HashMap<u32, Vec<u8>>>>>,
+    storage: ArcMutex<HashMap<u32, HashMap<u32, Vec<u8>>>>,
 }
 
 impl StorageSeqData {
@@ -144,9 +145,7 @@ impl StorageSeqData {
 
     pub async fn insert(&self, key: u32, seq: u32, value: Vec<u8>) {
         let mut map = self.storage.lock().await;
-        if !map.contains_key(&key) {
-            map.insert(key, HashMap::new());
-        }
+        map.entry(key).or_insert(HashMap::new());
         map.get_mut(&key).unwrap().insert(seq, value);
     }
 
