@@ -126,69 +126,67 @@ async fn process_tunnel_data(
     // read data from tunnel and send to client
 
     let frame_type = structures::FrameType::from_number(frame_type_num);
-    if matches!(frame_type, structures::FrameType::Close) {
-        let frame = structures::FrameClose::from_bytes(&data);
-        info!("close recv[{:?}]: {:?}", tunnel_id, frame);
-        // close frame received, there are 2 possibilities:
-        // 1. we initialized closing, remote connection closed, CONN_SENDERS cleaned up
-        // 2. server initialized closing, need full cleanup
-        let connection_id = frame.connection_id;
-        CONN_SENDERS.send(connection_id, vec![]).await.ok();
-        CONN_SENDERS.remove(connection_id).await;
-        future_data.remove(connection_id).await;
-        last_seq.remove(connection_id).await;
+    let (connection_id, seq, data) = match frame_type {
+        structures::FrameType::Close => {
+            let frame = structures::FrameClose::from_bytes(&data);
+            info!("close recv[{:?}]: {:?}", tunnel_id, frame);
+            (frame.connection_id, frame.seq, vec![])
+        }
+        structures::FrameType::Data => {
+            let frame = structures::FrameData::from_bytes(&data);
+            info!("data recv[{:?}]: conn_id: {}, seq: {}", tunnel_id, frame.connection_id, frame.seq);
+            (frame.connection_id, frame.seq, frame.data)
+        }
+        _ => panic!("unknown frame type"),
+    };
+
+    let is_already_closed = !CONN_SENDERS.contains_key(connection_id).await;
+    if is_already_closed {
+        debug!("already closed, {:?} frame ignored", frame_type);
         return Ok(());
     }
-    if matches!(frame_type, structures::FrameType::Data) {
-        let frame = structures::FrameData::from_bytes(&data);
-        info!("data recv[{:?}]: conn_id: {}, seq: {}", tunnel_id, frame.connection_id, frame.seq);
-        let connection_id = frame.connection_id;
-        let seq = frame.seq;
-        let is_already_closed = !CONN_SENDERS.contains_key(connection_id).await;
-        if is_already_closed {
-            debug!("already closed, data frame ignore");
+
+    let last_seq_internal = last_seq.storage();
+    // save this lock until the end of processing data or deadlock will occur
+    let mut last_seq_locked = last_seq_internal.lock().await;
+    let is_some_send_before = last_seq_locked.contains_key(&connection_id);
+    let mut last_send_seq: u32 = 0;
+    if is_some_send_before {
+        last_send_seq = last_seq_locked.get(&connection_id).unwrap().clone();
+    }
+    let mut should_send = false;
+    if !is_some_send_before && seq == 0 {
+        should_send = true;
+    } else if is_some_send_before && seq == last_send_seq + 1 {
+        should_send = true;
+    }
+
+    if should_send {
+        if let Err(e) = CONN_SENDERS.send(connection_id, data).await {
+            error!("queue to client error occurred; error = {:?}", e);
             return Ok(());
         }
-
-        let is_some_send_before = last_seq.contains_key(connection_id).await;
-        let mut last_send_seq: u32 = 0;
-        if is_some_send_before {
-            last_send_seq = last_seq.get(connection_id).await.unwrap();
-        }
-
-        let mut should_send = false;
-        if !is_some_send_before && seq == 0 {
-            should_send = true;
-        } else if is_some_send_before && seq == last_send_seq + 1 {
-            should_send = true;
-        }
-
-        if should_send {
-            if let Err(e) = CONN_SENDERS.send(connection_id, frame.data).await {
-                error!("send to client error occurred; error = {:?}", e);
-                return Ok(());
+        debug!("queue to client conn={} seq={}", connection_id, seq);
+        last_seq_locked.insert(connection_id, seq);
+        let mut next_seq = seq + 1;
+        loop {
+            if future_data.contains_seq(connection_id, next_seq).await {
+                let data = future_data.get(connection_id, next_seq).await.unwrap().clone();
+                CONN_SENDERS.send(connection_id, data).await?;
+                debug!("queue to client conn={} seq={}", connection_id, next_seq);
+                last_seq_locked.insert(connection_id, next_seq);
+                future_data.remove_seq(connection_id, next_seq).await;
+                next_seq = next_seq + 1;
+                continue;
             }
-            debug!("send to client conn={} seq={}", connection_id, seq);
-            last_seq.insert(connection_id, seq).await;
-            let mut next_seq = seq + 1;
-            loop {
-                if future_data.contains_seq(connection_id, next_seq).await {
-                    let data = future_data.get(connection_id, next_seq).await.unwrap().clone();
-                    CONN_SENDERS.send(connection_id, data).await?;
-                    debug!("send to client conn={} seq={}", connection_id, seq);
-                    last_seq.insert(connection_id, next_seq).await;
-                    future_data.remove_seq(connection_id, next_seq).await;
-                    next_seq = next_seq + 1;
-                    continue;
-                }
-                break;
-            }
-        } else {
-            future_data.insert(connection_id, seq, frame.data).await;
+            debug!("seq {} not found, stop sending", next_seq);
+            break;
         }
-        return Ok(());
+    } else {
+        debug!("postponed data conn={} seq={}", connection_id, seq);
+        future_data.insert(connection_id, seq, data).await;
     }
-    panic!("unknown frame type");
+    Ok(())
 }
 
 async fn create_tunnel(

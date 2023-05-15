@@ -75,6 +75,10 @@ impl StorageId {
     pub async fn get(&self, key: u32) -> Option<u32> {
         self.storage.lock().await.get(&key).cloned()
     }
+
+    pub fn storage (&self) -> Arc<Mutex<HashMap<u32, u32>>> {
+        self.storage.clone()
+    }
 }
 
 pub struct StorageList {
