@@ -13,7 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self};
 use tokio_util::sync::CancellationToken;
 
-const MAX_FRAME_SIZE: usize = 256;
+const MAX_FRAME_SIZE: usize = 4096;
 
 lazy_static! {
     // connection_id -> sender
