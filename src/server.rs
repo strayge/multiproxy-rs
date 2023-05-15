@@ -39,12 +39,21 @@ struct Cli {
 
     #[arg(short, long, default_value = "5050")]
     port: u16,
+
+    #[arg(long)]
+    debug: bool,
+
+    #[arg(long)]
+    info: bool,
+
+    #[arg(long)]
+    trace: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
-    logging::config_logging()?;
+    logging::config_logging(args.info, args.debug, args.trace)?;
 
     let listener = TcpListener::bind((args.listen, args.port)).await.unwrap();
     while let Ok((client_socket, _)) = listener.accept().await {

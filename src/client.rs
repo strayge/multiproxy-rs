@@ -41,12 +41,21 @@ struct Cli {
 
     #[arg(short, long, default_value = "2")]
     concurrency: u16,
+
+    #[arg(long)]
+    debug: bool,
+
+    #[arg(long)]
+    info: bool,
+
+    #[arg(long)]
+    trace: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
-    logging::config_logging()?;
+    logging::config_logging(args.info, args.debug, args.trace)?;
 
     create_tunnel(args.server_host, args.server_port, args.concurrency).await?;
 
