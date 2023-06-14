@@ -6,7 +6,7 @@ use crate::collections::{StorageId, StorageList, StorageSender, StorageSeqData};
 use crate::structures::Frame;
 use clap::Parser;
 use lazy_static::lazy_static;
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use tokio::io::AsyncReadExt;
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{TcpListener, TcpStream};
@@ -191,11 +191,14 @@ async fn read_client_loop(
     let mut client_id: u32 = 0;
     loop {
         let magic = socket_reader.read_u16().await?;
+        trace!("client_socket read magic={}", magic);
         if magic != structures::FRAME_MAGIC {
-            panic!("invalid magic");
+            panic!("invalid magic: {}", magic);
         }
         let frame_type = socket_reader.read_u16().await.expect("read frame type error");
+        trace!("client_socket read type={}", frame_type);
         let data_length = socket_reader.read_u16().await.expect("read frame data length error");
+        trace!("client_socket read len={}", data_length);
         let mut data_buf = vec![0; data_length as usize];
         socket_reader.read_exact(&mut data_buf).await.expect("read frame data error");
         debug!("client_socket read len={}", data_buf.len());
@@ -255,6 +258,7 @@ async fn read_remote_loop(
     loop {
         let len = remote_socket_reader.read(&mut buf).await?;
         debug!("remote_socket read len={}", len);
+        trace!("remote_socket read data={:?}", &buf[..len]);
         if len == 0 {
             break;
         }

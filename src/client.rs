@@ -234,7 +234,7 @@ async fn read_tunnel_loop(
     loop {
         let magic = tunnel_socket_reader.read_u16().await?;
         if magic != structures::FRAME_MAGIC {
-            panic!("invalid magic");
+            panic!("invalid magic: {}", magic);
         }
         let frame_type = tunnel_socket_reader.read_u16().await.expect("error read frame type");
         let data_length =
