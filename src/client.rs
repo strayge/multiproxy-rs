@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     create_tunnel(args.server_host, args.server_port, args.concurrency).await?;
 
-    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    let listener = TcpListener::bind((args.listen, args.port)).await?;
 
     while let Ok((client_socket, _)) = listener.accept().await {
         let connection_id = rand::random::<u32>();
